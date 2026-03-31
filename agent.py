@@ -11,24 +11,35 @@ from memory import (
     ShortTermMemory, 
     WorkingMemory, 
     LongTermMemory, 
-    MetaMemory,
-    MemoryEntry
+    MemoryEntry,
+    ProfileManager,
+    PersistenceManager
 )
+
 from memory.persistence import PersistenceManager
 
 load_dotenv()
 
 
 class CodeAssistant:
-    def __init__(self, session_id: str = "default"):
+    def __init__(self, session_id: str = None, profile_id: str = None):
+        # Инициализация менеджера персистентности
         self.persistence = PersistenceManager()
         
-        # Если session_id не передан — создаём новую сессию
+        # Управление сессией
         if session_id is None:
+            # Создаём новую сессию
             session_id = self.persistence.create_session("New conversation")
             print(f"✨ Created new session: {session_id}")
         
         self.session_id = session_id
+        
+        # Инициализация менеджера профилей
+        self.profile_manager = ProfileManager()
+        
+        # Если указан profile_id — активируем его
+        if profile_id:
+            self.profile_manager.set_active_profile(profile_id)
         
         # Инициализация API
         self.api_key = os.getenv("OPENROUTER_API_KEY")
@@ -45,13 +56,9 @@ class CodeAssistant:
         
         # Модели
         self.main_model = "stepfun/step-3.5-flash:free"
-        self.summarizer_model = "stepfun/step-3.5-flash:free"
-        
-        # Персистентное хранилище
-        self.persistence = PersistenceManager()
+        self.summarizer_model = "nvidia/nemotron-3-nano-30b-a3b:free"
         
         # Инициализация памяти
-        self.meta_memory = MetaMemory("memory_meta")
         self.short_term = ShortTermMemory(
             window_size=5,
             summarizer=self._summarize_messages
@@ -151,7 +158,9 @@ class CodeAssistant:
                 },
             },
         ]
-    
+        
+        print(f"✅ Agent initialized: session={self.session_id}, profile={self.profile_manager.get_active_profile()}")
+        
     def _load_state(self):
         """Загружает состояние из персистентного хранилища"""
         # Загружаем историю диалога в краткосрочную память
@@ -224,11 +233,18 @@ class CodeAssistant:
             return []
     
     def _build_system_prompt(self, relevant_memories: List[MemoryEntry]) -> str:
-        """Собирает system prompt из всех источников"""
-        meta = self.meta_memory.get_system_prompt()
+        """Собирает system prompt из профиля и других источников"""
+        
+        # 1. Профиль пользователя (вместо старых MD файлов)
+        profile_content = self.profile_manager.get_profile_for_prompt()
+        
+        # 2. Долговременная память (релевантные записи)
         long_term_context = self.long_term.format_for_prompt(relevant_memories)
+        
+        # 3. Рабочая память
         working_context = self.working.to_system_text()
         
+        # 4. Инструкция по инструментам (как была)
         tools_instruction = """
 ## Available Tools
 
@@ -250,10 +266,10 @@ You have these tools to manage memory:
 
 4. **add_blocker** - Report what's blocking progress
 
-**Important**: Call these tools immediately when the condition occurs. Don't just describe what you would save.
+**Important**: Call these tools immediately when the condition occurs.
 """
         
-        return f"""{meta}
+        return f"""{profile_content}
 
 {long_term_context}
 
@@ -270,6 +286,7 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
 - At DONE stage: decide what to save to long-term memory
 - If blocked: report blockers immediately
 """
+
     
     def _build_user_prompt(self, user_input: str) -> str:
         """Собирает user prompt с краткосрочной памятью"""
@@ -283,6 +300,21 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
 {user_input}"""
         else:
             return user_input
+
+    def switch_profile(self, profile_id: str) -> bool:
+        """Переключает профиль пользователя"""
+        success = self.profile_manager.set_active_profile(profile_id)
+        if success:
+            print(f"🔄 Switched to profile: {profile_id}")
+        return success
+    
+    def list_profiles(self) -> List[Dict]:
+        """Возвращает список доступных профилей"""
+        return self.profile_manager.list_profiles()
+    
+    def get_current_profile_id(self) -> str:
+        """Возвращает ID текущего профиля"""
+        return self.profile_manager.get_active_profile()
     
     def _execute_tool_calls(self, tool_calls: List) -> str:
         """Выполняет вызовы инструментов и возвращает результат"""

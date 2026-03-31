@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 from agent import CodeAssistant
 from memory.persistence import PersistenceManager
@@ -59,6 +60,7 @@ if "current_session_id" not in st.session_state:
 
 # ===== SIDEBAR =====
 with st.sidebar:
+    # ===== СЕССИИ =====
     st.title("💬 Conversations")
     
     # Кнопка новой сессии
@@ -96,14 +98,127 @@ with st.sidebar:
         
         st.divider()
     
-    # ===== ОТОБРАЖЕНИЕ ПАМЯТИ (как было) =====
-    st.title("🧠 Memory Layers")
+    st.divider()
+    
+    # ===== ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ =====
+    st.title("👤 Profile")
+    
+    # Получаем текущий профиль
+    profiles = st.session_state.assistant.list_profiles()
+    active_profile_id = st.session_state.assistant.get_current_profile_id()
+    
+    # Отображаем текущий профиль
+    active_profile = next((p for p in profiles if p["id"] == active_profile_id), None)
+    if active_profile:
+        if active_profile["is_custom"]:
+            st.info(f"**Active:** {active_profile['name']} (custom)")
+        else:
+            st.info(f"**Active:** {active_profile['name']}")
+    
+    # Управление профилями
+    with st.expander("📋 Manage Profiles", expanded=False):
+        for profile in profiles:
+            col1, col2, col3 = st.columns([3, 1, 1])
+            with col1:
+                if profile["id"] == active_profile_id:
+                    st.markdown(f"**→ {profile['name']}**")
+                else:
+                    st.write(profile["name"])
+                st.caption(profile["description"][:50] if profile["description"] else "")
+            
+            with col2:
+                if profile["id"] != active_profile_id:
+                    if st.button("Switch", key=f"switch_{profile['id']}"):
+                        st.session_state.assistant.switch_profile(profile["id"])
+                        st.rerun()
+            
+            with col3:
+                if profile["is_custom"] and profile["id"] != active_profile_id:
+                    if st.button("🗑️", key=f"del_{profile['id']}"):
+                        st.session_state.assistant.profile_manager.delete_profile(profile["id"])
+                        st.rerun()
+            
+            # Кнопка редактирования для активного пользовательского профиля
+            if profile["id"] == active_profile_id and profile["is_custom"]:
+                with st.popover("✏️ Edit Profile"):
+                    current = st.session_state.assistant.profile_manager.get_profile_content(active_profile_id)
+                    
+                    new_style = st.text_area(
+                        "Style (communication, code preferences)",
+                        value=current.get("style.md", ""),
+                        height=200
+                    )
+                    new_constraints = st.text_area(
+                        "Constraints (tech stack, limitations)",
+                        value=current.get("constraint.md", ""),
+                        height=150
+                    )
+                    new_context = st.text_area(
+                        "Context (project, role, goals)",
+                        value=current.get("context.md", ""),
+                        height=150
+                    )
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Save Changes"):
+                            st.session_state.assistant.profile_manager.update_profile(
+                                active_profile_id,
+                                style=new_style,
+                                constraints=new_constraints,
+                                context=new_context
+                            )
+                            st.success("Profile updated!")
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("Reset to Default"):
+                            st.session_state.assistant.profile_manager.reset_to_default(active_profile_id)
+                            st.success("Reset to default!")
+                            st.rerun()
+            
+            st.divider()
+    
+    # Создание нового профиля
+    with st.expander("✨ Create New Profile", expanded=False):
+        new_id = st.text_input("Profile ID (lowercase, no spaces)", key="new_profile_id")
+        new_name = st.text_input("Display Name", key="new_profile_name")
+        
+        default_content = st.session_state.assistant.profile_manager._get_default_content()
+        
+        edit_mode = st.checkbox("Edit before creating")
+        
+        if edit_mode:
+            new_style = st.text_area("Style", value=default_content.get("style.md", ""), height=150)
+            new_constraints = st.text_area("Constraints", value=default_content.get("constraint.md", ""), height=150)
+            new_context = st.text_area("Context", value=default_content.get("context.md", ""), height=150)
+        else:
+            new_style = default_content.get("style.md", "")
+            new_constraints = default_content.get("constraint.md", "")
+            new_context = default_content.get("context.md", "")
+        
+        if st.button("Create Profile"):
+            if new_id and new_name:
+                success = st.session_state.assistant.profile_manager.create_profile(
+                    new_id, new_name,
+                    style=new_style,
+                    constraints=new_constraints,
+                    context=new_context
+                )
+                if success:
+                    st.success(f"Profile '{new_name}' created!")
+                    st.rerun()
+                else:
+                    st.error("Profile ID already exists")
+            else:
+                st.error("Profile ID and Name are required")
+    
+    st.divider()
     
     # ===== КРАТКОСРОЧНАЯ ПАМЯТЬ =====
     with st.expander("📝 Short-Term Memory", expanded=True):
         assistant = st.session_state.assistant
         
-        # Суммаризация предыдущего диалога
         summary = assistant.short_term.summary
         if summary:
             st.markdown("**📋 Summary of earlier conversation:**")
@@ -111,7 +226,6 @@ with st.sidebar:
         else:
             st.caption("No summary yet (need more than 5 messages)")
         
-        # Последние 5 сообщений
         st.markdown(f"**💬 Last {min(5, assistant.short_term.total_messages)} messages:**")
         recent = assistant.short_term.get_recent_window()
         if recent:
@@ -124,7 +238,6 @@ with st.sidebar:
         st.markdown(f"*Total messages in session: {assistant.short_term.total_messages}*")
     
     # ===== РАБОЧАЯ ПАМЯТЬ =====
-
     with st.expander("⚙️ Working Memory", expanded=True):
         working = assistant.working
         
@@ -162,7 +275,6 @@ with st.sidebar:
         if working.blockers:
             st.warning(f"⚠️ Blockers: {', '.join(working.blockers)}")
         
-        # Кнопки управления
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🔄 Reset Working Memory"):
@@ -173,29 +285,8 @@ with st.sidebar:
                 assistant.clear_short_term()
                 st.rerun()
     
-    # ===== ДОЛГОВРЕМЕННАЯ ПАМЯТЬ (МЕТА) =====
-    with st.expander("📚 Long-Term Memory (Meta)", expanded=False):
-        meta = assistant.meta_memory.load_all()
-        
-        # style.md
-        st.markdown("**🎨 Style**")
-        style_preview = meta.get("style.md", "")[:200]
-        st.caption(style_preview + "..." if len(meta.get("style.md", "")) > 200 else style_preview)
-        
-        # constraint.md
-        st.markdown("**🔒 Constraints**")
-        constraint_preview = meta.get("constraint.md", "")[:200]
-        st.caption(constraint_preview + "..." if len(meta.get("constraint.md", "")) > 200 else constraint_preview)
-        
-        # context.md
-        st.markdown("**📖 Context**")
-        context_preview = meta.get("context.md", "")[:200]
-        st.caption(context_preview + "..." if len(meta.get("context.md", "")) > 200 else context_preview)
-        
-        st.divider()
-        
-        # Сохранённые воспоминания
-        st.markdown("**💾 Saved Memories**")
+    # ===== ДОЛГОВРЕМЕННАЯ ПАМЯТЬ =====
+    with st.expander("💾 Long-Term Memory", expanded=False):
         memory_types = ["user_preference", "code_pattern", "arch_decision", "lesson_learned"]
         for mem_type in memory_types:
             entries = assistant.long_term.get_by_type(mem_type, limit=2)
@@ -205,9 +296,11 @@ with st.sidebar:
                         st.text(f"• {e.content[:150]}...")
                         st.caption(f"  importance: {e.importance} | tags: {', '.join(e.tags)}")
         
-        # Кнопка принудительного сохранения (для теста)
-        test_save = st.text_input("Test save to long-term:", placeholder="content")
-        test_type = st.selectbox("Type", memory_types)
+        # Тестовое сохранение
+        st.divider()
+        st.markdown("**Test Save to Long-Term Memory**")
+        test_save = st.text_input("Content:", key="test_memory_content")
+        test_type = st.selectbox("Type:", memory_types, key="test_memory_type")
         if st.button("Save Test Entry") and test_save:
             assistant.long_term.save_simple(test_save, test_type, importance=3)
             st.success(f"Saved: {test_save[:50]}...")
@@ -216,18 +309,20 @@ with st.sidebar:
     # ===== ОТЛАДКА =====
     with st.expander("🐛 Debug Info", expanded=False):
         st.json({
+            "session_id": st.session_state.current_session_id,
             "working_memory": assistant.working.to_dict(),
             "short_term_total": assistant.short_term.total_messages,
             "short_term_window": assistant.short_term.window_size,
             "has_summary": bool(assistant.short_term.summary),
+            "active_profile": active_profile_id
         })
         
         if st.button("Force Rerun"):
             st.rerun()
 
-# Основная область — только чат
+# ===== ОСНОВНАЯ ОБЛАСТЬ =====
 st.title("🤖 Code Assistant with Memory")
-st.caption(f"Model: {st.session_state.assistant.main_model}")
+st.caption(f"Model: {st.session_state.assistant.main_model} | Session: {st.session_state.current_session_id[:8]}... | Profile: {active_profile_id}")
 
 # Чат
 for msg in st.session_state.messages:
@@ -235,6 +330,20 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
 
 if prompt := st.chat_input("Что нужно сделать в проекте?"):
+    # Проверяем, первое ли это сообщение
+    if len(st.session_state.messages) == 0:
+        # Обновляем название сессии
+        words = prompt.strip().split()[:5]
+        title = " ".join(words)
+        if len(title) > 50:
+            title = title[:47] + "..."
+        
+        st.session_state.persistence.update_session_info(
+            st.session_state.current_session_id,
+            title=title,
+            first_preview=prompt[:100]
+        )
+    
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)

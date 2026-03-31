@@ -1,0 +1,65 @@
+
+stepfun/step-3.5-flash:free
+nvidia/nemotron-3-nano-30b-a3b:free
+arcee-ai/trinity-large-preview:free
+
+
+['nvidia/nemotron-3-super-120b-a12b:free', 
+'minimax/minimax-m2.5:free', 
+'stepfun/step-3.5-flash:free', 
+'arcee-ai/trinity-large-preview:free', 
+'liquid/lfm-2.5-1.2b-thinking:free', 
+'liquid/lfm-2.5-1.2b-instruct:free', 
+'nvidia/nemotron-3-nano-30b-a3b:free', 
+'arcee-ai/trinity-mini:free', 
+'nvidia/nemotron-nano-12b-v2-vl:free', 
+'qwen/qwen3-next-80b-a3b-instruct:free', 
+'nvidia/nemotron-nano-9b-v2:free', 
+'openai/gpt-oss-120b:free', 
+'openai/gpt-oss-20b:free', 
+'z-ai/glm-4.5-air:free', 
+'qwen/qwen3-coder:free', 
+'cognitivecomputations/dolphin-mistral-24b-venice-edition:free', 
+'google/gemma-3n-e2b-it:free', 
+'google/gemma-3n-e4b-it:free', 
+'qwen/qwen3-4b:free', 
+'mistralai/mistral-small-3.1-24b-instruct:free', 
+'google/gemma-3-4b-it:free', 
+'google/gemma-3-12b-it:free', 
+'google/gemma-3-27b-it:free', 
+'meta-llama/llama-3.3-70b-instruct:free', 
+'meta-llama/llama-3.2-3b-instruct:free', 
+'nousresearch/hermes-3-llama-3.1-405b:free']
+
+СЛАБЫЕ (компактные, быстрые, для простых задач)
+Модель	Параметры	Контекст	Характеристика
+google/gemma-3-4b-it:free	4B	8K	Минимальная из Gemma 3, сверхбыстрая, для простых инференсов
+google/gemma-3n-e2b-it:free	2B	8K	Самая лёгкая, для edge-устройств, базовая логика
+meta-llama/llama-3.2-3b-instruct:free	3B	128K	Компактная Llama, хороший контекст, быстрая
+qwen/qwen3-4b:free	4B	32K	Базовая Qwen, сбалансированная для небольших задач
+nvidia/nemotron-nano-9b-v2:free	9B	128K	Легкая Nemotron, мультимодальная, для быстрых ответов
+liquid/lfm-2.5-1.2b-instruct:free	1.2B	32K	Минимальная Liquid, для простых инструкций
+liquid/lfm-2.5-1.2b-thinking:free	1.2B	32K	Та же архитектура, но с режимом "размышления"
+arcee-ai/trinity-mini:free	1.5B	128K	Мини-версия Trinity, большой контекст при малом размере
+🟡 СРЕДНИЕ (баланс скорости и качества, reasoning)
+Модель	Параметры	Контекст	Характеристика
+stepfun/step-3.5-flash:free	196B total / 11B active	256K	Твой фаворит. Reasoning-модель, отличный баланс
+nvidia/nemotron-3-nano-30b-a3b:free	30B total / 3B active	256K	MoE архитектура, агентная, для сложных рассуждений
+google/gemma-3-12b-it:free	12B	8K	Усиленная Gemma, хорошее reasoning
+google/gemma-3n-e4b-it:free	4B	8K	Компактная, но с улучшенной логикой
+qwen/qwen3-coder:free	7B	32K	Специализирована на коде, хороша для алгоритмов
+mistralai/mistral-small-3.1-24b-instruct:free	24B	32K	Mistral Small, надёжная, сбалансированная
+cognitivecomputations/dolphin-mistral-24b-venice-edition:free	24B	32K	Fine-tune Mistral, улучшенное следование инструкциям
+openai/gpt-oss-20b:free	20B	16K	OpenAI OSS версия, базовая, для общих задач
+arcee-ai/trinity-large-preview:free	400B total / 13B active	131K	Мощная MoE, для креативных и агентных задач
+z-ai/glm-4.5-air:free	10B	32K	Zhipu AI, для китайского и английского, хороший баланс
+qwen/qwen3-next-80b-a3b-instruct:free	80B total / 8B active	32K	Qwen MoE, для сложных инструкций
+🔴 СИЛЬНЫЕ (топовая глубина, максимальные возможности)
+Модель	Параметры	Контекст	Характеристика
+nvidia/nemotron-3-super-120b-a12b:free	120B total / 12B active	256K	Флагман Nemotron. Топ для агентных сценариев, сложного reasoning
+google/gemma-3-27b-it:free	27B	8K	Крупнейшая Gemma 3, максимальная глубина в линейке
+meta-llama/llama-3.3-70b-instruct:free	70B	128K	Llama 3.3 70B, топ для сложных рассуждений, мультиязычная
+nousresearch/hermes-3-llama-3.1-405b:free	405B	128K	Самая крупная. Hermes на Llama 3.1, максимальная креативность и глубина
+minimax/minimax-m2.5:free	465B total / 45B active	1M	Огромная MoE, 1M контекст, для агентных систем и длинных документов
+openai/gpt-oss-120b:free	120B	16K	Крупная OpenAI OSS, для сложных аналитических задач
+nvidia/nemotron-nano-12b-v2-vl:free	12B	128K	Особый случай. Мультимодальная (текст+изображение), уникальна в списке
