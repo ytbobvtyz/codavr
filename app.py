@@ -12,12 +12,16 @@ if "persistence" not in st.session_state:
 # Функция для переключения сессии
 def switch_session(session_id: str):
     st.session_state.current_session_id = session_id
-    st.session_state.assistant = CodeAssistant(session_id=session_id)
+    st.session_state.assistant = CodeAssistant(
+        session_id=session_id,
+        profile_id=st.session_state.assistant.get_current_profile_id()
+    )
     st.session_state.messages = []
     
-    # Загружаем историю
+    profile_id = st.session_state.assistant.get_current_profile_id()
     saved_messages = st.session_state.assistant.persistence.load_conversation(
-        session_id=session_id
+        session_id=session_id,
+        profile_id=profile_id
     )
     for msg in saved_messages:
         st.session_state.messages.append({
@@ -27,16 +31,29 @@ def switch_session(session_id: str):
     st.rerun()
 
 def create_new_session():
-    new_id = st.session_state.persistence.create_session("New conversation")
+    profile_id = st.session_state.assistant.get_current_profile_id()
+    new_id = st.session_state.persistence.create_session(
+        "New conversation",
+        profile_id=profile_id
+    )
     switch_session(new_id)
 
 def delete_session(session_id: str):
     if session_id == st.session_state.current_session_id:
         st.warning("Cannot delete current session. Switch to another first.")
         return
-    st.session_state.persistence.delete_session(session_id)
+    
+    profile_id = st.session_state.assistant.get_current_profile_id()
+    st.session_state.persistence.delete_session(session_id, profile_id=profile_id)
     st.rerun()
 
+# В sidebar, при загрузке списка сессий:
+    # Список всех сессий ТОЛЬКО для текущего профиля
+    profile_id = st.session_state.assistant.get_current_profile_id()
+    sessions = st.session_state.persistence.list_sessions(
+        profile_id=profile_id,
+        limit=20
+    )
 # Инициализация текущей сессии
 if "current_session_id" not in st.session_state:
     # Пытаемся загрузить последнюю сессию
@@ -130,6 +147,25 @@ with st.sidebar:
                 if profile["id"] != active_profile_id:
                     if st.button("Switch", key=f"switch_{profile['id']}"):
                         st.session_state.assistant.switch_profile(profile["id"])
+    
+                        # Создаём новую сессию для нового профиля или загружаем последнюю
+                        new_profile_id = profile["id"]
+                        sessions = st.session_state.persistence.list_sessions(
+                            profile_id=new_profile_id,
+                            limit=1
+                        )
+                        
+                        if sessions:
+                            # Загружаем последнюю сессию профиля
+                            switch_session(sessions[0]["session_id"])
+                        else:
+                            # Создаём новую сессию
+                            new_session_id = st.session_state.persistence.create_session(
+                                "New conversation",
+                                profile_id=new_profile_id
+                            )
+                            switch_session(new_session_id)
+                        
                         st.rerun()
             
             with col3:

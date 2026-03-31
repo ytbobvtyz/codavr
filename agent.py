@@ -55,7 +55,7 @@ class CodeAssistant:
         )
         
         # Модели
-        self.main_model = "stepfun/step-3.5-flash:free"
+        self.main_model = "nvidia/nemotron-3-nano-30b-a3b:free" # stepfun/step-3.5-flash:free
         self.summarizer_model = "nvidia/nemotron-3-nano-30b-a3b:free"
         
         # Инициализация памяти
@@ -160,45 +160,8 @@ class CodeAssistant:
         ]
         
         print(f"✅ Agent initialized: session={self.session_id}, profile={self.profile_manager.get_active_profile()}")
-        
-    def _load_state(self):
-        """Загружает состояние из персистентного хранилища"""
-        # Загружаем историю диалога в краткосрочную память
-        saved_messages = self.persistence.load_conversation(session_id=self.session_id)
-        for msg in saved_messages:
-            self.short_term.add(msg["role"], msg["content"])
-        
-        print(f"📂 Loaded {len(saved_messages)} messages from history")
-        
-        # Загружаем рабочую память
-        saved_working = self.persistence.load_working_memory(session_id=self.session_id)
-        if saved_working:
-            self.working = WorkingMemory.from_dict(saved_working)
-            print(f"📂 Loaded working memory: {self.working.goal}")
-        
-        # Загружаем суммаризацию (если есть)
-        saved_summary = self.persistence.load_latest_summary(session_id=self.session_id)
-        if saved_summary:
-            # Восстанавливаем суммаризацию в краткосрочную память
-            self.short_term._summary = saved_summary
-            self.short_term._summary_dirty = False
-            print(f"📂 Loaded summary: {saved_summary[:100]}...")
-    
-    def _save_state(self):
-        """Сохраняет текущее состояние в персистентное хранилище"""
-        # Сохраняем рабочую память
-        self.persistence.save_working_memory(
-            self.working.to_dict(), 
-            session_id=self.session_id
-        )
-        
-        # Сохраняем суммаризацию (если изменилась)
-        if self.short_term.summary:
-            self.persistence.save_summary(
-                self.short_term.summary,
-                self.short_term.total_messages,
-                session_id=self.session_id
-            )
+
+
     
     def _summarize_messages(self, messages: List) -> str:
         """Суммаризирует старые сообщения для краткосрочной памяти"""
@@ -353,38 +316,29 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
         return "\n".join(results) if results else "No tools executed"
     
 
-    def update_session_title(self, user_input: str):
-        """Обновляет заголовок сессии на основе первого сообщения пользователя"""
-        # Берём первые 5 слов, убираем лишние пробелы
-        words = user_input.strip().split()[:5]
-        title = " ".join(words)
-        
-        # Ограничиваем длину
-        if len(title) > 50:
-            title = title[:47] + "..."
-        
-        # Сохраняем preview (первые 100 символов) для отображения в меню
-        preview = user_input[:100] if len(user_input) > 100 else user_input
-        
-        self.persistence.update_session_info(
-            self.session_id, 
-            title=title,
-            first_preview=preview
-        )
-        print(f"📝 Session title updated: '{title}'")
+
 
     def ask(self, user_input: str) -> str:
         """Основной метод для общения с ассистентом"""
+        profile_id = self.profile_manager.get_active_profile()
+        
         # Проверяем, первое ли это сообщение в сессии
-        existing_messages = self.persistence.load_conversation(session_id=self.session_id)
+        existing_messages = self.persistence.load_conversation(
+            session_id=self.session_id,
+            profile_id=profile_id
+        )
         is_first_message = len(existing_messages) == 0
         
         # Если первое сообщение — обновляем название сессии
         if is_first_message:
             self.update_session_title(user_input)
         
-        # Сохраняем сообщение пользователя в БД
-        self.persistence.save_message("user", user_input, session_id=self.session_id)
+        # Сохраняем сообщение пользователя
+        self.persistence.save_message(
+            "user", user_input,
+            session_id=self.session_id,
+            profile_id=profile_id
+        )
 
         # Обновляем заголовок сессии при первом сообщении
         total_messages = len(self.persistence.load_conversation(session_id=self.session_id))
@@ -447,13 +401,14 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
             
             # 7. Сохраняем ответ
             self.short_term.add("assistant", answer)
-            self.persistence.save_message("assistant", answer, session_id=self.session_id)
+            # После ответа сохраняем
+            self.persistence.save_message(
+                "assistant", answer,
+                session_id=self.session_id,
+                profile_id=profile_id
+            )
             self._save_state()
-            total_messages = len(existing_messages) + 2  # user + assistant
-            self.persistence.update_session_info(
-                self.session_id,
-                message_count=total_messages
-        )
+            
             return answer
             
         except Exception as e:
@@ -492,6 +447,80 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
                 print(f"  {entry_type}: {len(entries)} entries")
                 for e in entries:
                     print(f"    - {e.content[:80]}...")
+    
+# agent.py — все методы, работающие с persistence
+
+    def _load_state(self):
+        """Загружает состояние из персистентного хранилища"""
+        profile_id = self.profile_manager.get_active_profile()
+        
+        # Загружаем историю диалога
+        saved_messages = self.persistence.load_conversation(
+            session_id=self.session_id,
+            profile_id=profile_id
+        )
+        for msg in saved_messages:
+            self.short_term.add(msg["role"], msg["content"])
+        
+        print(f"📂 Loaded {len(saved_messages)} messages from history (profile: {profile_id})")
+        
+        # Загружаем рабочую память
+        saved_working = self.persistence.load_working_memory(
+            session_id=self.session_id,
+            profile_id=profile_id
+        )
+        if saved_working:
+            self.working = WorkingMemory.from_dict(saved_working)
+            print(f"📂 Loaded working memory: {self.working.goal}")
+        
+        # Загружаем суммаризацию
+        saved_summary = self.persistence.load_latest_summary(
+            session_id=self.session_id,
+            profile_id=profile_id
+        )
+        if saved_summary:
+            self.short_term._summary = saved_summary
+            self.short_term._summary_dirty = False
+            print(f"📂 Loaded summary: {saved_summary[:100]}...")
+    
+    def _save_state(self):
+        """Сохраняет текущее состояние в персистентное хранилище"""
+        profile_id = self.profile_manager.get_active_profile()
+        
+        # Сохраняем рабочую память
+        self.persistence.save_working_memory(
+            self.working.to_dict(),
+            session_id=self.session_id,
+            profile_id=profile_id
+        )
+        
+        # Сохраняем суммаризацию
+        if self.short_term.summary:
+            self.persistence.save_summary(
+                self.short_term.summary,
+                self.short_term.total_messages,
+                session_id=self.session_id,
+                profile_id=profile_id
+            )
+    
+    def update_session_title(self, user_input: str):
+        """Обновляет заголовок сессии на основе первого сообщения"""
+        profile_id = self.profile_manager.get_active_profile()
+        
+        words = user_input.strip().split()[:5]
+        title = " ".join(words)
+        if len(title) > 50:
+            title = title[:47] + "..."
+        
+        preview = user_input[:100] if len(user_input) > 100 else user_input
+        
+        self.persistence.update_session_info(
+            self.session_id,
+            profile_id=profile_id,
+            title=title,
+            first_preview=preview
+        )
+        print(f"📝 Session title updated: '{title}'")
     
     def reset_working_memory(self):
         """Сбрасывает рабочую память для новой задачи"""
