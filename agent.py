@@ -1,39 +1,30 @@
 # agent.py
 import os
+import json
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+
 from openai import OpenAI
 from dotenv import load_dotenv
-from memory import ShortTermMemory, WorkingMemory, LongTermMemory
 
-# Загружаем .env при импорте
+from memory import (
+    ShortTermMemory, 
+    WorkingMemory, 
+    LongTermMemory, 
+    MetaMemory,
+    MemoryEntry
+)
+
+# Загружаем переменные окружения
 load_dotenv()
 
-SYSTEM_PROMPT = """You are a code assistant for a Python/FastAPI/React developer.
-
-Your capabilities:
-- Read and analyze code files
-- Suggest improvements and write code
-- Help debug issues
-- Explain code architecture
-
-Rules:
-- Always show code changes as diffs when possible
-- Never suggest destructive operations without warning
-- Prefer async SQLAlchemy patterns when working with databases
-- Follow PEP 8 for Python code
-- For React, use functional components with hooks
-
-You have access to three memory layers:
-- Short-term: current conversation flow
-- Working: current task context (open files, task variables)
-- Long-term: user preferences and project patterns
-
-Always consider the working memory context when answering.
-Use long-term memory to recall past solutions and user preferences."""
 
 class CodeAssistant:
+    """Код-ассистент с трехуровневой памятью"""
+    
     def __init__(self):
+        # Инициализация API
         self.api_key = os.getenv("OPENROUTER_API_KEY")
-        
         if not self.api_key:
             raise ValueError(
                 "OPENROUTER_API_KEY not found in .env file.\n"
@@ -45,103 +36,353 @@ class CodeAssistant:
             api_key=self.api_key,
         )
         
-        self.short_term = ShortTermMemory()
+        # Модели
+        self.main_model = "stepfun/step-3.5-flash:free"
+        self.summarizer_model = "arcee-ai/trinity-large-preview:free"  # можно удешевить позже
+        
+        # Инициализация памяти
+        self.meta_memory = MetaMemory("memory_meta")
+        self.short_term = ShortTermMemory(
+            window_size=5,
+            summarizer=self._summarize_messages
+        )
         self.working = WorkingMemory()
-        self.long_term = LongTermMemory()
+        self.long_term = LongTermMemory("assistant_memory.db")
         
-        self.model = "stepfun/step-3.5-flash:free"
-    
-    def _build_prompt(self, user_input: str) -> list:
-        """Собирает messages с system prompt и всей памятью"""
-        
-        working_context = self.working.get_context()
-        long_term_context = self.long_term.get_context(user_input)
-        conversation = self.short_term.get_context()
-        
-        user_prompt = f"""
-{long_term_context}
-
-CURRENT TASK CONTEXT:
-{working_context}
-
-CONVERSATION HISTORY:
-{self._format_conversation(conversation)}
-
-USER: {user_input}
-
-ASSISTANT:"""
-        
-        return [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt}
+        # Инструменты (tools), доступные агенту
+        self.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "update_working_memory",
+                    "description": "Update the working memory with current task context. Call this when task goal changes, files are opened, or status updates.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal": {"type": "string", "description": "Current main goal"},
+                            "status": {"type": "string", "enum": ["planning", "coding", "testing", "done"]},
+                            "next_steps": {"type": "array", "items": {"type": "string"}},
+                            "files": {"type": "array", "items": {"type": "string"}},
+                            "tech_stack": {"type": "array", "items": {"type": "string"}},
+                            "decisions": {"type": "object", "additionalProperties": {"type": "string"}},
+                            "blockers": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "save_to_long_term_memory",
+                    "description": "Save important information to long-term memory. Use for: user preferences, reusable code patterns, architectural decisions, lessons learned.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "description": "The content to save"},
+                            "entry_type": {
+                                "type": "string", 
+                                "enum": ["user_preference", "code_pattern", "arch_decision", "lesson_learned"],
+                                "description": "Type of memory"
+                            },
+                            "importance": {"type": "integer", "minimum": 1, "maximum": 5, "description": "Importance 1-5"},
+                            "tags": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["content", "entry_type"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "add_task",
+                    "description": "Add a subtask to working memory",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "done"]},
+                        },
+                        "required": ["name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "update_task_status",
+                    "description": "Update status of a subtask",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "done"]},
+                        },
+                        "required": ["name", "status"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "add_blocker",
+                    "description": "Report a blocker that prevents progress",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "blocker": {"type": "string"},
+                        },
+                        "required": ["blocker"],
+                    },
+                },
+            },
         ]
     
-    def _format_conversation(self, messages):
-        formatted = []
-        for msg in messages[-5:]:
-            formatted.append(f"{msg['role'].upper()}: {msg['content']}")
-        return "\n".join(formatted)
+    def _summarize_messages(self, messages: List) -> str:
+        """Суммаризирует старые сообщения для краткосрочной памяти"""
+        # messages — это список Message объектов из short_term.py
+        conversation = "\n".join([f"{m.role}: {m.content}" for m in messages])
+        
+        prompt = f"""Суммаризируй следующий диалог кратко, но информативно (3-5 предложений). 
+Сохрани: основную тему, ключевые вопросы, важные решения пользователя.
+
+Диалог:
+{conversation}
+
+Суммаризация:"""
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.summarizer_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=200,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"⚠️ Summarization failed: {e}")
+            return f"[Previous conversation: {len(messages)} messages]"
     
-    def _decide_what_to_save(self, user_input: str, response: str):
-        self.short_term.add("user", user_input)
-        self.short_term.add("assistant", response)
+    def _recall_relevant_memories(self, user_input: str) -> List[MemoryEntry]:
+        """Восстанавливает релевантные записи из долговременной памяти"""
+        try:
+            return self.long_term.recall(user_input, limit=3)
+        except Exception as e:
+            print(f"⚠️ Memory recall failed: {e}")
+            return []
+    
+    def _build_system_prompt(self, relevant_memories: List[MemoryEntry]) -> str:
+        """Собирает system prompt из всех источников"""
+        # 1. Мета-память (MD файлы)
+        meta = self.meta_memory.get_system_prompt()
         
-        if "task:" in user_input.lower() or "задача:" in user_input:
-            task = user_input.split(":", 1)[-1].strip()
-            self.working.set_task(task)
-            print(f"💾 Saved to working memory: new task '{task}'")
+        # 2. Долговременная память (релевантные записи)
+        long_term_context = self.long_term.format_for_prompt(relevant_memories)
         
-        if "file:" in user_input.lower():
-            import re
-            files = re.findall(r'file:\s*([^\s]+)', user_input)
-            for file in files:
-                self.working.add_open_file(file)
-                print(f"💾 Saved to working memory: opened file {file}")
+        # 3. Рабочая память (текущая задача)
+        working_context = self.working.to_system_text()
         
-        important_keywords = ["learn", "запомни", "important", "важно", "preference", "предпочтение"]
-        if any(keyword in user_input.lower() for keyword in important_keywords):
-            self.long_term.save_user_preference(user_input)
-            print(f"🧠 Saved to long-term memory: user preference")
+        # 4. Инструкция по использованию инструментов
+        tools_instruction = """
+## Available Tools
+
+You have these tools to manage memory:
+
+1. **update_working_memory** - Update current task context. Call when:
+   - User states a new goal
+   - You start working on a file
+   - Task status changes
+   - You identify a decision or blocker
+
+2. **save_to_long_term_memory** - Save important patterns. Call when:
+   - User expresses a preference ("я люблю...", "предпочитаю...")
+   - You discover a reusable code pattern
+   - An architectural decision is made
+   - A lesson is learned
+
+3. **add_task** / **update_task_status** - Manage subtasks
+
+4. **add_blocker** - Report what's blocking progress
+
+**Important**: Call these tools immediately when the condition occurs. Don't just describe what you would save.
+"""
         
-        if "pattern:" in user_input.lower() or "шаблон:" in user_input:
-            pattern = user_input.split(":", 1)[-1].strip()
-            self.long_term.save_project_pattern(pattern)
-            print(f"🧠 Saved to long-term memory: code pattern")
+        return f"""{meta}
+
+{long_term_context}
+
+{working_context}
+
+{tools_instruction}
+
+## Your Workflow
+
+Follow this cycle: PLANNING → CODING → TESTING → DONE
+
+- At PLANNING stage: extract goal, files, tech stack → call update_working_memory
+- During work: keep working memory updated
+- At DONE stage: decide what to save to long-term memory
+- If blocked: report blockers immediately
+"""
+    
+    def _build_user_prompt(self, user_input: str) -> str:
+        """Собирает user prompt с краткосрочной памятью"""
+        short_context = self.short_term.get_context()
+        
+        if short_context:
+            return f"""{short_context}
+
+## Current User Input
+
+{user_input}"""
+        else:
+            return user_input
+    
+    def _execute_tool_calls(self, tool_calls: List) -> str:
+        """Выполняет вызовы инструментов и возвращает результат"""
+        results = []
+        
+        for tool_call in tool_calls:
+            name = tool_call.function.name
+            args = json.loads(tool_call.function.arguments)
+            
+            if name == "update_working_memory":
+                changed = self.working.update(**args)
+                results.append(f"Working memory updated: {', '.join(changed)}")
+            
+            elif name == "save_to_long_term_memory":
+                entry = MemoryEntry(
+                    content=args["content"],
+                    entry_type=args["entry_type"],
+                    importance=args.get("importance", 3),
+                    tags=args.get("tags", [])
+                )
+                entry_id = self.long_term.save(entry)
+                results.append(f"Saved to long-term memory (ID: {entry_id})")
+            
+            elif name == "add_task":
+                self.working.add_task(args["name"], args.get("status", "pending"))
+                results.append(f"Task added: {args['name']}")
+            
+            elif name == "update_task_status":
+                success = self.working.update_task(args["name"], args["status"])
+                results.append(f"Task {args['name']} → {args['status']}: {'done' if success else 'not found'}")
+            
+            elif name == "add_blocker":
+                self.working.add_blocker(args["blocker"])
+                results.append(f"Blocker added: {args['blocker']}")
+        
+        return "\n".join(results) if results else "No tools executed"
     
     def ask(self, user_input: str) -> str:
+        """Основной метод для общения с ассистентом"""
+        
+        # 1. Восстанавливаем релевантные воспоминания
+        relevant_memories = self._recall_relevant_memories(user_input)
+        
+        # 2. Строим промпты
+        system_prompt = self._build_system_prompt(relevant_memories)
+        user_prompt = self._build_user_prompt(user_input)
+        
+        # 3. Добавляем текущее сообщение в краткосрочную память
+        self.short_term.add("user", user_input)
+        
+        # 4. Формируем messages для API
+        messages = [
+            {"role": "system", "content": system_prompt},
+        ]
+        
+        # Добавляем историю из краткосрочной памяти (последние N сообщений)
+        messages.extend(self.short_term.get_recent_window())
+        
+        # Добавляем текущий запрос
+        messages.append({"role": "user", "content": user_prompt})
+        
         try:
-            messages = self._build_prompt(user_input)
-            
+            # 5. Первый вызов — получаем ответ и возможные tool calls
             response = self.client.chat.completions.create(
-                model=self.model,
+                model=self.main_model,
                 messages=messages,
+                tools=self.tools,
+                tool_choice="auto",
                 temperature=0.7,
             )
             
-            answer = response.choices[0].message.content
-            self._decide_what_to_save(user_input, answer)
+            assistant_message = response.choices[0].message
+            
+            # 6. Обрабатываем tool calls, если есть
+            if assistant_message.tool_calls:
+                # Добавляем ассистента с tool calls в историю
+                self.short_term.add("assistant", json.dumps([tc.function.name for tc in assistant_message.tool_calls]))
+                
+                # Выполняем инструменты
+                tool_results = self._execute_tool_calls(assistant_message.tool_calls)
+                
+                # Добавляем результат инструментов как system сообщение
+                messages.append(assistant_message)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": assistant_message.tool_calls[0].id,
+                    "content": tool_results
+                })
+                
+                # Второй вызов — получаем финальный ответ после инструментов
+                final_response = self.client.chat.completions.create(
+                    model=self.main_model,
+                    messages=messages,
+                    temperature=0.7,
+                )
+                answer = final_response.choices[0].message.content
+            else:
+                answer = assistant_message.content
+            
+            # 7. Сохраняем ответ в краткосрочную память
+            self.short_term.add("assistant", answer)
+            
             return answer
             
         except Exception as e:
             error_msg = str(e)
             if "api_key" in error_msg.lower() or "unauthorized" in error_msg.lower() or "401" in error_msg:
-                return "❌ API key is invalid or not set. Please check your OPENROUTER_API_KEY in .env file."
+                return "❌ API key is invalid. Please check your OPENROUTER_API_KEY in .env file."
             return f"❌ Error: {error_msg}"
     
     def show_memory_state(self):
-        print("\n" + "="*50)
+        """Отладка: показывает состояние всей памяти"""
+        print("\n" + "="*60)
         print("🧠 MEMORY STATE")
-        print("="*50)
+        print("="*60)
         
-        print("\n📝 SHORT-TERM (last 5 messages):")
-        for msg in self.short_term.messages[-5:]:
-            print(f"  {msg['role']}: {msg['content'][:50]}...")
+        print("\n📁 META MEMORY (from MD files):")
+        meta = self.meta_memory.load_all()
+        for name, content in meta.items():
+            print(f"  {name}: {content[:100]}..." if len(content) > 100 else f"  {name}: {content}")
+        
+        print("\n💾 SHORT-TERM MEMORY:")
+        print(f"  Total messages: {self.short_term.total_messages}")
+        print(f"  Window size: {self.short_term.window_size}")
+        summary = self.short_term.summary
+        if summary:
+            print(f"  Summary: {summary[:200]}...")
         
         print("\n⚙️ WORKING MEMORY:")
-        print(f"  Current task: {self.working.current_task}")
-        print(f"  Open files: {self.working.open_files}")
-        print(f"  Variables: {self.working.task_variables}")
+        print(self.working.to_system_text())
         
-        print("\n💾 LONG-TERM (recent):")
-        recent = self.long_term.get_context()
-        print(f"  {recent[:200]}...")
+        print("\n📚 LONG-TERM MEMORY (recent by type):")
+        for entry_type in ["user_preference", "code_pattern", "arch_decision", "lesson_learned"]:
+            entries = self.long_term.get_by_type(entry_type, limit=2)
+            if entries:
+                print(f"  {entry_type}: {len(entries)} entries")
+                for e in entries:
+                    print(f"    - {e.content[:80]}...")
+    
+    def reset_working_memory(self):
+        """Сбрасывает рабочую память для новой задачи"""
+        self.working.reset()
+        print("✅ Working memory reset")
+    
+    def clear_short_term(self):
+        """Очищает краткосрочную память"""
+        self.short_term.clear()
+        print("✅ Short-term memory cleared")
