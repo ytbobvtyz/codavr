@@ -1,20 +1,102 @@
-# app.py
 import streamlit as st
 from agent import CodeAssistant
+from memory.persistence import PersistenceManager
 
 st.set_page_config(page_title="Code Assistant with Memory", layout="wide")
 
-# Инициализация
-if "assistant" not in st.session_state:
-    try:
-        st.session_state.assistant = CodeAssistant()
-        st.session_state.messages = []
-    except ValueError as e:
-        st.error(f"❌ {str(e)}")
-        st.stop()
+# Инициализация менеджера сессий
+if "persistence" not in st.session_state:
+    st.session_state.persistence = PersistenceManager()
 
-# Используем стандартный sidebar Streamlit — он фиксирован по умолчанию
+# Функция для переключения сессии
+def switch_session(session_id: str):
+    st.session_state.current_session_id = session_id
+    st.session_state.assistant = CodeAssistant(session_id=session_id)
+    st.session_state.messages = []
+    
+    # Загружаем историю
+    saved_messages = st.session_state.assistant.persistence.load_conversation(
+        session_id=session_id
+    )
+    for msg in saved_messages:
+        st.session_state.messages.append({
+            "role": msg["role"], 
+            "content": msg["content"]
+        })
+    st.rerun()
+
+def create_new_session():
+    new_id = st.session_state.persistence.create_session("New conversation")
+    switch_session(new_id)
+
+def delete_session(session_id: str):
+    if session_id == st.session_state.current_session_id:
+        st.warning("Cannot delete current session. Switch to another first.")
+        return
+    st.session_state.persistence.delete_session(session_id)
+    st.rerun()
+
+# Инициализация текущей сессии
+if "current_session_id" not in st.session_state:
+    # Пытаемся загрузить последнюю сессию
+    sessions = st.session_state.persistence.list_sessions(limit=1)
+    if sessions:
+        st.session_state.current_session_id = sessions[0]["session_id"]
+    else:
+        st.session_state.current_session_id = st.session_state.persistence.create_session("New conversation")
+    
+    st.session_state.assistant = CodeAssistant(session_id=st.session_state.current_session_id)
+    st.session_state.messages = []
+    
+    saved_messages = st.session_state.assistant.persistence.load_conversation(
+        session_id=st.session_state.current_session_id
+    )
+    for msg in saved_messages:
+        st.session_state.messages.append({
+            "role": msg["role"], 
+            "content": msg["content"]
+        })
+
+# ===== SIDEBAR =====
 with st.sidebar:
+    st.title("💬 Conversations")
+    
+    # Кнопка новой сессии
+    if st.button("➕ New Conversation", use_container_width=True):
+        create_new_session()
+    
+    st.divider()
+    
+    # Список всех сессий
+    sessions = st.session_state.persistence.list_sessions(limit=20)
+    
+    for sess in sessions:
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            # Форматируем дату
+            created = sess["created_at"][:16] if sess["created_at"] else "unknown"
+            # Показываем первые 5 слов первого сообщения
+            preview = sess["first_preview"] or "Empty conversation"
+            preview_short = preview[:50] + "..." if len(preview) > 50 else preview
+            
+            # Подсветка активной сессии
+            if sess["session_id"] == st.session_state.current_session_id:
+                st.markdown(f"**→ {preview_short}**")
+                st.caption(f"📅 {created} | {sess['message_count']} msgs")
+            else:
+                st.markdown(f"📄 {preview_short}")
+                st.caption(f"📅 {created}")
+        
+        with col2:
+            if st.button("🗑️", key=f"del_{sess['session_id']}"):
+                delete_session(sess["session_id"])
+        
+        if st.button("Open", key=f"open_{sess['session_id']}", use_container_width=True):
+            switch_session(sess["session_id"])
+        
+        st.divider()
+    
+    # ===== ОТОБРАЖЕНИЕ ПАМЯТИ (как было) =====
     st.title("🧠 Memory Layers")
     
     # ===== КРАТКОСРОЧНАЯ ПАМЯТЬ =====
@@ -42,6 +124,7 @@ with st.sidebar:
         st.markdown(f"*Total messages in session: {assistant.short_term.total_messages}*")
     
     # ===== РАБОЧАЯ ПАМЯТЬ =====
+
     with st.expander("⚙️ Working Memory", expanded=True):
         working = assistant.working
         

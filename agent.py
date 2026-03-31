@@ -14,15 +14,22 @@ from memory import (
     MetaMemory,
     MemoryEntry
 )
+from memory.persistence import PersistenceManager
 
-# Загружаем переменные окружения
 load_dotenv()
 
 
 class CodeAssistant:
-    """Код-ассистент с трехуровневой памятью"""
-    
-    def __init__(self):
+    def __init__(self, session_id: str = "default"):
+        self.persistence = PersistenceManager()
+        
+        # Если session_id не передан — создаём новую сессию
+        if session_id is None:
+            session_id = self.persistence.create_session("New conversation")
+            print(f"✨ Created new session: {session_id}")
+        
+        self.session_id = session_id
+        
         # Инициализация API
         self.api_key = os.getenv("OPENROUTER_API_KEY")
         if not self.api_key:
@@ -38,7 +45,10 @@ class CodeAssistant:
         
         # Модели
         self.main_model = "stepfun/step-3.5-flash:free"
-        self.summarizer_model = "arcee-ai/trinity-large-preview:free"  # можно удешевить позже
+        self.summarizer_model = "stepfun/step-3.5-flash:free"
+        
+        # Персистентное хранилище
+        self.persistence = PersistenceManager()
         
         # Инициализация памяти
         self.meta_memory = MetaMemory("memory_meta")
@@ -46,8 +56,11 @@ class CodeAssistant:
             window_size=5,
             summarizer=self._summarize_messages
         )
-        self.working = WorkingMemory()
         self.long_term = LongTermMemory("assistant_memory.db")
+        self.working = WorkingMemory()
+        
+        # Восстанавливаем состояние из БД
+        self._load_state()
         
         # Инструменты (tools), доступные агенту
         self.tools = [
@@ -139,9 +152,47 @@ class CodeAssistant:
             },
         ]
     
+    def _load_state(self):
+        """Загружает состояние из персистентного хранилища"""
+        # Загружаем историю диалога в краткосрочную память
+        saved_messages = self.persistence.load_conversation(session_id=self.session_id)
+        for msg in saved_messages:
+            self.short_term.add(msg["role"], msg["content"])
+        
+        print(f"📂 Loaded {len(saved_messages)} messages from history")
+        
+        # Загружаем рабочую память
+        saved_working = self.persistence.load_working_memory(session_id=self.session_id)
+        if saved_working:
+            self.working = WorkingMemory.from_dict(saved_working)
+            print(f"📂 Loaded working memory: {self.working.goal}")
+        
+        # Загружаем суммаризацию (если есть)
+        saved_summary = self.persistence.load_latest_summary(session_id=self.session_id)
+        if saved_summary:
+            # Восстанавливаем суммаризацию в краткосрочную память
+            self.short_term._summary = saved_summary
+            self.short_term._summary_dirty = False
+            print(f"📂 Loaded summary: {saved_summary[:100]}...")
+    
+    def _save_state(self):
+        """Сохраняет текущее состояние в персистентное хранилище"""
+        # Сохраняем рабочую память
+        self.persistence.save_working_memory(
+            self.working.to_dict(), 
+            session_id=self.session_id
+        )
+        
+        # Сохраняем суммаризацию (если изменилась)
+        if self.short_term.summary:
+            self.persistence.save_summary(
+                self.short_term.summary,
+                self.short_term.total_messages,
+                session_id=self.session_id
+            )
+    
     def _summarize_messages(self, messages: List) -> str:
         """Суммаризирует старые сообщения для краткосрочной памяти"""
-        # messages — это список Message объектов из short_term.py
         conversation = "\n".join([f"{m.role}: {m.content}" for m in messages])
         
         prompt = f"""Суммаризируй следующий диалог кратко, но информативно (3-5 предложений). 
@@ -174,16 +225,10 @@ class CodeAssistant:
     
     def _build_system_prompt(self, relevant_memories: List[MemoryEntry]) -> str:
         """Собирает system prompt из всех источников"""
-        # 1. Мета-память (MD файлы)
         meta = self.meta_memory.get_system_prompt()
-        
-        # 2. Долговременная память (релевантные записи)
         long_term_context = self.long_term.format_for_prompt(relevant_memories)
-        
-        # 3. Рабочая память (текущая задача)
         working_context = self.working.to_system_text()
         
-        # 4. Инструкция по использованию инструментов
         tools_instruction = """
 ## Available Tools
 
@@ -275,8 +320,47 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
         
         return "\n".join(results) if results else "No tools executed"
     
+
+    def update_session_title(self, user_input: str):
+        """Обновляет заголовок сессии на основе первого сообщения пользователя"""
+        # Берём первые 5 слов, убираем лишние пробелы
+        words = user_input.strip().split()[:5]
+        title = " ".join(words)
+        
+        # Ограничиваем длину
+        if len(title) > 50:
+            title = title[:47] + "..."
+        
+        # Сохраняем preview (первые 100 символов) для отображения в меню
+        preview = user_input[:100] if len(user_input) > 100 else user_input
+        
+        self.persistence.update_session_info(
+            self.session_id, 
+            title=title,
+            first_preview=preview
+        )
+        print(f"📝 Session title updated: '{title}'")
+
     def ask(self, user_input: str) -> str:
         """Основной метод для общения с ассистентом"""
+        # Проверяем, первое ли это сообщение в сессии
+        existing_messages = self.persistence.load_conversation(session_id=self.session_id)
+        is_first_message = len(existing_messages) == 0
+        
+        # Если первое сообщение — обновляем название сессии
+        if is_first_message:
+            self.update_session_title(user_input)
+        
+        # Сохраняем сообщение пользователя в БД
+        self.persistence.save_message("user", user_input, session_id=self.session_id)
+
+        # Обновляем заголовок сессии при первом сообщении
+        total_messages = len(self.persistence.load_conversation(session_id=self.session_id))
+        if total_messages == 0:
+            self.update_session_title(user_input)
+
+        # Сохраняем сообщение пользователя в БД
+        self.persistence.save_message("user", user_input, session_id=self.session_id)
         
         # 1. Восстанавливаем релевантные воспоминания
         relevant_memories = self._recall_relevant_memories(user_input)
@@ -293,14 +377,11 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
             {"role": "system", "content": system_prompt},
         ]
         
-        # Добавляем историю из краткосрочной памяти (последние N сообщений)
         messages.extend(self.short_term.get_recent_window())
-        
-        # Добавляем текущий запрос
         messages.append({"role": "user", "content": user_prompt})
         
         try:
-            # 5. Первый вызов — получаем ответ и возможные tool calls
+            # 5. Первый вызов
             response = self.client.chat.completions.create(
                 model=self.main_model,
                 messages=messages,
@@ -311,15 +392,11 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
             
             assistant_message = response.choices[0].message
             
-            # 6. Обрабатываем tool calls, если есть
+            # 6. Обрабатываем tool calls
             if assistant_message.tool_calls:
-                # Добавляем ассистента с tool calls в историю
                 self.short_term.add("assistant", json.dumps([tc.function.name for tc in assistant_message.tool_calls]))
-                
-                # Выполняем инструменты
                 tool_results = self._execute_tool_calls(assistant_message.tool_calls)
                 
-                # Добавляем результат инструментов как system сообщение
                 messages.append(assistant_message)
                 messages.append({
                     "role": "tool",
@@ -327,7 +404,6 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
                     "content": tool_results
                 })
                 
-                # Второй вызов — получаем финальный ответ после инструментов
                 final_response = self.client.chat.completions.create(
                     model=self.main_model,
                     messages=messages,
@@ -337,9 +413,15 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
             else:
                 answer = assistant_message.content
             
-            # 7. Сохраняем ответ в краткосрочную память
+            # 7. Сохраняем ответ
             self.short_term.add("assistant", answer)
-            
+            self.persistence.save_message("assistant", answer, session_id=self.session_id)
+            self._save_state()
+            total_messages = len(existing_messages) + 2  # user + assistant
+            self.persistence.update_session_info(
+                self.session_id,
+                message_count=total_messages
+        )
             return answer
             
         except Exception as e:
@@ -353,6 +435,8 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
         print("\n" + "="*60)
         print("🧠 MEMORY STATE")
         print("="*60)
+        
+        print(f"\n📂 Session ID: {self.session_id}")
         
         print("\n📁 META MEMORY (from MD files):")
         meta = self.meta_memory.load_all()
@@ -380,6 +464,7 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
     def reset_working_memory(self):
         """Сбрасывает рабочую память для новой задачи"""
         self.working.reset()
+        self._save_state()
         print("✅ Working memory reset")
     
     def clear_short_term(self):
