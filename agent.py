@@ -55,8 +55,8 @@ class CodeAssistant:
         )
         
         # Модели
-        self.main_model = "nvidia/nemotron-3-nano-30b-a3b:free" # stepfun/step-3.5-flash:free
-        self.summarizer_model = "nvidia/nemotron-3-nano-30b-a3b:free"
+        self.main_model = "stepfun/step-3.5-flash:free" # stepfun/step-3.5-flash:free
+        self.summarizer_model = "arcee-ai/trinity-large-preview:free" #nvidia/nemotron-3-nano-30b-a3b:free
         
         # Инициализация памяти
         self.short_term = ShortTermMemory(
@@ -277,78 +277,60 @@ class CodeAssistant:
     def _build_system_prompt(self, relevant_memories: List[MemoryEntry]) -> str:
         """Собирает system prompt из профиля и других источников"""
         
-        # 1. Профиль пользователя (вместо старых MD файлов)
         profile_content = self.profile_manager.get_profile_for_prompt()
-        
-        # 2. Долговременная память (релевантные записи)
         long_term_context = self.long_term.format_for_prompt(relevant_memories)
-        
-        # 3. Рабочая память
         working_context = self.working.to_system_text()
         
-        # 4. Инструкция по инструментам (как была)
-        tools_instruction = """
-## Available Tools
+        # Упрощённая инструкция — без криков и противоречий
+        unified_rules = """
+    ## Task States & Transitions
 
-You have these tools to manage memory:
+    You have 4 states: PLANNING, EXECUTION, VALIDATION, DONE.
 
-1. **update_working_memory** - Update current task context. Call when:
-   - User states a new goal
-   - You start working on a file
-   - Task status changes
-   - You identify a decision or blocker
+    **When to transition:**
 
-2. **save_to_long_term_memory** - Save important patterns. Call when:
-   - User expresses a preference ("я люблю...", "предпочитаю...")
-   - You discover a reusable code pattern
-   - An architectural decision is made
-   - A lesson is learned
+    | Current State | Trigger | Next State |
+    |---------------|---------|------------|
+    | PLANNING | User confirms plan OR says "start" | EXECUTION |
+    | EXECUTION | Code is written | VALIDATION |
+    | EXECUTION | Architecture is wrong | PLANNING |
+    | VALIDATION | Tests pass AND user says "done" or "accept" | DONE |
+    | VALIDATION | Tests fail or user says "fix" | EXECUTION |
+    | DONE | User asks new question | PLANNING |
 
-3. **add_task** / **update_task_status** - Manage subtasks
+    **CRITICAL RULES:**
+    1. Do NOT ask clarifying questions unless impossible to proceed
+    2. When user says "write code" — write code immediately, don't ask
+    3. When tests pass and user confirms — transition to DONE
+    4. Always call transition_state tool when changing states
+    5. Be concise — don't over-explain
 
-4. **add_blocker** - Report what's blocking progress
+    **Tools:**
+    - transition_state(target_state, reason)
+    - update_current_step(current_step, next_step)
+    - update_working_memory(goal, files, blockers)
+    - save_to_long_term_memory(content, entry_type)
 
-**Important**: Call these tools immediately when the condition occurs.
-"""
+    ## How to complete a task
+    When user says ANY of these, transition to DONE:
+    - "задача завершена"
+    - "всё готово"
+    - "принимаю"
+    - "done"
+    - "закрывай"
+
+    Example:
+    User: "задача завершена" → You call transition_state(target_state="done", reason="user confirmed")
+    """
         
         return f"""{profile_content}
 
-{long_term_context}
+    {long_term_context if long_term_context else ""}
 
-{working_context}
+    {working_context}
 
-{tools_instruction}
-
-## Task State Machine (Конечный автомат задачи)
-
-You have a formal task state machine. States flow:
-
-📋 PLANNING → ⚙️ EXECUTION → 🔍 VALIDATION → ✅ DONE
-         ↑                    │
-         └────────────────────┘ (на доработку)
-
-**Допустимые переходы:**
-- PLANNING → EXECUTION: задача понятна, можно приступать
-- EXECUTION → VALIDATION: код написан, нужна проверка
-- EXECUTION → PLANNING: поняли что архитектура неверна, перепроектируем
-- VALIDATION → DONE: проверка пройдена, задача завершена
-- VALIDATION → EXECUTION: найдены проблемы, нужны доработки
-- DONE → PLANNING: новая задача
-
-**Tools для управления состоянием:**
-- `transition_state(target_state, reason)` - переход в новое состояние
-- `update_current_step(current_step, next_step)` - обновить текущий шаг
-- `set_expected_from_user(expected)` - сказать, что ждёте от пользователя
-- `add_blocker(blocker)` / `resolve_blocker(blocker)` - управление блокерами
-
-**Правила:**
-1. В состоянии PLANNING: анализируй, декомпозируй, уточняй требования
-2. В состоянии EXECUTION: пиши код, реализуй
-3. В состоянии VALIDATION: тестируй, показывай результат, жди подтверждения
-4. В состоянии DONE: суммаризируй, готовься к следующей задаче
-5. Всегда обновляй current_step при прогрессе
-6. Если ждёшь ответа пользователя — вызови set_expected_from_user()
-"""
+    {unified_rules}
+    """
 
     
     def _build_user_prompt(self, user_input: str) -> str:
