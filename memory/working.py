@@ -1,137 +1,175 @@
+# memory/working.py
+import json
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 
-# Убираем Enum, используем простые строки
-VALID_STATUSES = ["planning", "coding", "testing", "done"]
+from memory.task_state import TaskContext, TaskState
 
 
 @dataclass
 class WorkingMemory:
-    """Рабочая память — текущий контекст задачи."""
+    """
+    Рабочая память — текущий контекст задачи.
+    Использует TaskContext для управления состоянием.
+    """
     
-    goal: str = ""
-    tasks: List[Dict[str, str]] = field(default_factory=list)
-    status: str = "planning"  # строка, не Enum
-    next_steps: List[str] = field(default_factory=list)
+    # Контекст задачи (состояние, цель, подзадачи)
+    task: TaskContext = field(default_factory=TaskContext)
+    
+    # Файлы, с которыми работаем
     files: List[str] = field(default_factory=list)
-    tech_stack: List[str] = field(default_factory=list)
-    decisions: Dict[str, str] = field(default_factory=dict)
+    
+    # Блокеры (что мешает завершить)
     blockers: List[str] = field(default_factory=list)
+    
+    # Произвольные переменные задачи
     variables: Dict[str, Any] = field(default_factory=dict)
     
-    def update(self, **kwargs) -> List[str]:
-        changed = []
-        for key, value in kwargs.items():
-            if key == "status" and value not in VALID_STATUSES:
-                print(f"⚠️ Invalid status '{value}', keeping '{self.status}'")
-                continue
-            if hasattr(self, key) and getattr(self, key) != value:
-                setattr(self, key, value)
-                changed.append(key)
-        return changed
+    def update_task_goal(self, goal: str, description: str = ""):
+        """Обновляет цель задачи"""
+        self.task.goal = goal
+        if description:
+            self.task.description = description
+        self.task.updated_at = self._now()
     
-    def add_task(self, name: str, status: str = "pending") -> None:
-        self.tasks.append({"name": name, "status": status})
+    def transition_state(self, new_state: str, reason: str = "") -> bool:
+        """Переводит задачу в новое состояние"""
+        try:
+            new_state_enum = TaskState(new_state)
+            return self.task.transition(new_state_enum, reason)
+        except ValueError:
+            return False
     
-    def update_task(self, name: str, status: str) -> bool:
-        for task in self.tasks:
-            if task["name"] == name:
-                task["status"] = status
-                return True
-        return False
+    def add_subtask(self, name: str, status: str = "pending"):
+        """Добавляет подзадачу"""
+        self.task.add_subtask(name, status)
     
-    def add_file(self, filepath: str) -> None:
+    def update_subtask(self, name: str, status: str) -> bool:
+        """Обновляет статус подзадачи"""
+        return self.task.update_subtask(name, status)
+    
+    def add_file(self, filepath: str):
+        """Добавляет файл в рабочую область"""
         if filepath not in self.files:
             self.files.append(filepath)
     
-    def add_blocker(self, blocker: str) -> None:
+    def remove_file(self, filepath: str):
+        """Удаляет файл из рабочей области"""
+        if filepath in self.files:
+            self.files.remove(filepath)
+    
+    def add_blocker(self, blocker: str):
+        """Добавляет блокер"""
         if blocker not in self.blockers:
             self.blockers.append(blocker)
     
     def resolve_blocker(self, blocker: str) -> bool:
+        """Убирает блокер"""
         if blocker in self.blockers:
             self.blockers.remove(blocker)
             return True
         return False
     
+    def set_expected_from_user(self, expected: str):
+        """Устанавливает ожидание от пользователя"""
+        self.task.set_expected_from_user(expected)
+    
     def to_dict(self) -> Dict:
+        """Превращает в словарь для JSON сериализации"""
         return {
-            "goal": self.goal,
-            "tasks": self.tasks,
-            "status": self.status,  # теперь просто строка
-            "next_steps": self.next_steps,
+            "task": self.task.to_dict(),
             "files": self.files,
-            "tech_stack": self.tech_stack,
-            "decisions": self.decisions,
             "blockers": self.blockers,
             "variables": self.variables,
         }
     
     @classmethod
     def from_dict(cls, data: Dict) -> "WorkingMemory":
+        """Восстанавливает из словаря"""
         memory = cls()
-        memory.goal = data.get("goal", "")
-        memory.tasks = data.get("tasks", [])
-        memory.status = data.get("status", "planning")
-        memory.next_steps = data.get("next_steps", [])
+        memory.task = TaskContext.from_dict(data.get("task", {}))
         memory.files = data.get("files", [])
-        memory.tech_stack = data.get("tech_stack", [])
-        memory.decisions = data.get("decisions", {})
         memory.blockers = data.get("blockers", [])
         memory.variables = data.get("variables", {})
         return memory
     
     def to_system_text(self) -> str:
-        if not self.goal and not self.tasks and not self.files:
-            return "## CURRENT WORKING MEMORY\n(No active task)"
+        """Форматирует для вставки в system prompt"""
+        parts = ["## CURRENT WORKING MEMORY"]
         
-        lines = [
-            "## CURRENT WORKING MEMORY",
-            f"**Goal:** {self.goal}" if self.goal else "",
-            f"**Status:** {self.status}",
-            "",
-            "**Tasks:**" if self.tasks else "",
-        ]
+        # Контекст задачи
+        parts.append(self.task.to_prompt())
         
-        for task in self.tasks:
-            status_icon = "✅" if task["status"] == "done" else "🔄" if task["status"] == "in_progress" else "⏳"
-            lines.append(f"  {status_icon} {task['name']} ({task['status']})")
-        
-        if self.next_steps:
-            lines.append("\n**Next Steps:**")
-            for step in self.next_steps:
-                lines.append(f"  → {step}")
-        
+        # Дополнительная информация
         if self.files:
-            lines.append("\n**Files in context:**")
+            parts.append(f"\n**Files in context:**")
             for f in self.files:
-                lines.append(f"  📄 {f}")
-        
-        if self.tech_stack:
-            lines.append(f"\n**Tech Stack:** {', '.join(self.tech_stack)}")
-        
-        if self.decisions:
-            lines.append("\n**Decisions:**")
-            for key, value in self.decisions.items():
-                lines.append(f"  • {key}: {value}")
+                parts.append(f"  📄 {f}")
         
         if self.blockers:
-            lines.append("\n**Blockers:**")
+            parts.append(f"\n**Blockers:**")
             for blocker in self.blockers:
-                lines.append(f"  ⚠️ {blocker}")
+                parts.append(f"  ⚠️ {blocker}")
         
-        return "\n".join(filter(None, lines))
+        if self.variables:
+            parts.append(f"\n**Variables:**")
+            for key, value in self.variables.items():
+                parts.append(f"  • {key}: {value}")
+        
+        return "\n".join(parts)
     
     def is_empty(self) -> bool:
-        return not (self.goal or self.tasks or self.files)
+        """Проверяет, пустая ли рабочая память"""
+        return self.task.is_empty() and not self.files and not self.blockers
     
-    def reset(self) -> None:
-        self.goal = ""
-        self.tasks = []
-        self.status = "planning"
-        self.next_steps = []
+    def reset(self):
+        """Сбрасывает рабочую память для новой задачи"""
+        self.task.reset()
         self.files = []
-        self.tech_stack = []
-        self.decisions = {}
         self.blockers = []
         self.variables = {}
+    
+    def _now(self) -> str:
+        """Возвращает текущее время в ISO формате"""
+        from datetime import datetime
+        return datetime.now().isoformat()
+    
+    def update(self, **kwargs) -> List[str]:
+        """
+        Обновляет поля рабочей памяти.
+        Используется для обратной совместимости со старыми tool calls.
+        """
+        changed = []
+        
+        if "goal" in kwargs:
+            self.task.goal = kwargs["goal"]
+            changed.append("goal")
+        
+        if "status" in kwargs:
+            if self.transition_state(kwargs["status"]):
+                changed.append("status")
+        
+        if "next_steps" in kwargs and kwargs["next_steps"]:
+            self.task.next_step = kwargs["next_steps"][0]
+            changed.append("next_steps")
+        
+        if "files" in kwargs:
+            for f in kwargs["files"]:
+                self.add_file(f)
+            changed.append("files")
+        
+        if "tech_stack" in kwargs:
+            self.variables["tech_stack"] = kwargs["tech_stack"]
+            changed.append("tech_stack")
+        
+        if "decisions" in kwargs:
+            for key, value in kwargs["decisions"].items():
+                self.variables[f"decision_{key}"] = value
+            changed.append("decisions")
+        
+        if "blockers" in kwargs:
+            for b in kwargs["blockers"]:
+                self.add_blocker(b)
+            changed.append("blockers")
+        
+        return changed

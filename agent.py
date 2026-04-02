@@ -157,6 +157,85 @@ class CodeAssistant:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "transition_state",
+                    "description": "Move task to next state. Use when: planning complete → execution, code written → validation, validation passed → done, or need redesign → back to planning",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "target_state": {
+                                "type": "string", 
+                                "enum": ["planning", "execution", "validation", "done"],
+                                "description": "Target state to transition to"
+                            },
+                            "reason": {
+                                "type": "string",
+                                "description": "Reason for transition (e.g., 'code written', 'needs redesign')"
+                            }
+                        },
+                        "required": ["target_state"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "update_current_step",
+                    "description": "Update current step and optionally next step",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "current_step": {"type": "string"},
+                            "next_step": {"type": "string"}
+                        },
+                        "required": ["current_step"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "set_expected_from_user",
+                    "description": "Tell user what you expect from them (e.g., confirmation, clarification)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "expected": {"type": "string"}
+                        },
+                        "required": ["expected"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "add_blocker",
+                    "description": "Report a blocker that prevents progress",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "blocker": {"type": "string"}
+                        },
+                        "required": ["blocker"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "resolve_blocker",
+                    "description": "Mark a blocker as resolved",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "blocker": {"type": "string"}
+                        },
+                        "required": ["blocker"]
+                    }
+                }
+            }
         ]
         
         print(f"✅ Agent initialized: session={self.session_id}, profile={self.profile_manager.get_active_profile()}")
@@ -240,14 +319,35 @@ You have these tools to manage memory:
 
 {tools_instruction}
 
-## Your Workflow
+## Task State Machine (Конечный автомат задачи)
 
-Follow this cycle: PLANNING → CODING → TESTING → DONE
+You have a formal task state machine. States flow:
 
-- At PLANNING stage: extract goal, files, tech stack → call update_working_memory
-- During work: keep working memory updated
-- At DONE stage: decide what to save to long-term memory
-- If blocked: report blockers immediately
+📋 PLANNING → ⚙️ EXECUTION → 🔍 VALIDATION → ✅ DONE
+         ↑                    │
+         └────────────────────┘ (на доработку)
+
+**Допустимые переходы:**
+- PLANNING → EXECUTION: задача понятна, можно приступать
+- EXECUTION → VALIDATION: код написан, нужна проверка
+- EXECUTION → PLANNING: поняли что архитектура неверна, перепроектируем
+- VALIDATION → DONE: проверка пройдена, задача завершена
+- VALIDATION → EXECUTION: найдены проблемы, нужны доработки
+- DONE → PLANNING: новая задача
+
+**Tools для управления состоянием:**
+- `transition_state(target_state, reason)` - переход в новое состояние
+- `update_current_step(current_step, next_step)` - обновить текущий шаг
+- `set_expected_from_user(expected)` - сказать, что ждёте от пользователя
+- `add_blocker(blocker)` / `resolve_blocker(blocker)` - управление блокерами
+
+**Правила:**
+1. В состоянии PLANNING: анализируй, декомпозируй, уточняй требования
+2. В состоянии EXECUTION: пиши код, реализуй
+3. В состоянии VALIDATION: тестируй, показывай результат, жди подтверждения
+4. В состоянии DONE: суммаризируй, готовься к следующей задаче
+5. Всегда обновляй current_step при прогрессе
+6. Если ждёшь ответа пользователя — вызови set_expected_from_user()
 """
 
     
@@ -288,6 +388,7 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
             args = json.loads(tool_call.function.arguments)
             
             if name == "update_working_memory":
+                # Теперь метод update есть в WorkingMemory
                 changed = self.working.update(**args)
                 results.append(f"Working memory updated: {', '.join(changed)}")
             
@@ -302,19 +403,36 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
                 results.append(f"Saved to long-term memory (ID: {entry_id})")
             
             elif name == "add_task":
-                self.working.add_task(args["name"], args.get("status", "pending"))
-                results.append(f"Task added: {args['name']}")
+                self.working.add_subtask(args["name"], args.get("status", "pending"))
+                results.append(f"Subtask added: {args['name']}")
             
             elif name == "update_task_status":
-                success = self.working.update_task(args["name"], args["status"])
-                results.append(f"Task {args['name']} → {args['status']}: {'done' if success else 'not found'}")
+                success = self.working.update_subtask(args["name"], args["status"])
+                results.append(f"Subtask {args['name']} → {args['status']}: {'done' if success else 'not found'}")
             
             elif name == "add_blocker":
                 self.working.add_blocker(args["blocker"])
                 results.append(f"Blocker added: {args['blocker']}")
+            
+            elif name == "resolve_blocker":
+                success = self.working.resolve_blocker(args["blocker"])
+                results.append(f"Blocker {args['blocker']}: {'resolved' if success else 'not found'}")
+            
+            elif name == "transition_state":
+                success = self.working.transition_state(args["target_state"], args.get("reason", ""))
+                results.append(f"State transition: {success}")
+                if success:
+                    results.append(f"Now in state: {self.working.task.state.value}")
+            
+            elif name == "update_current_step":
+                self.working.task.update_progress(args["current_step"], args.get("next_step", ""))
+                results.append(f"Current step updated: {args['current_step']}")
+            
+            elif name == "set_expected_from_user":
+                self.working.set_expected_from_user(args["expected"])
+                results.append(f"Expected from user: {args['expected']}")
         
         return "\n".join(results) if results else "No tools executed"
-    
 
 
 
@@ -454,7 +572,7 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
         """Загружает состояние из персистентного хранилища"""
         profile_id = self.profile_manager.get_active_profile()
         
-        # Загружаем историю диалога
+        # Загружаем историю диалога в краткосрочную память
         saved_messages = self.persistence.load_conversation(
             session_id=self.session_id,
             profile_id=profile_id
@@ -471,14 +589,16 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
         )
         if saved_working:
             self.working = WorkingMemory.from_dict(saved_working)
-            print(f"📂 Loaded working memory: {self.working.goal}")
+            # Исправлено: goal теперь в task.goal
+            print(f"📂 Loaded working memory: {self.working.task.goal}")
         
-        # Загружаем суммаризацию
+        # Загружаем суммаризацию (если есть)
         saved_summary = self.persistence.load_latest_summary(
             session_id=self.session_id,
             profile_id=profile_id
         )
         if saved_summary:
+            # Восстанавливаем суммаризацию в краткосрочную память
             self.short_term._summary = saved_summary
             self.short_term._summary_dirty = False
             print(f"📂 Loaded summary: {saved_summary[:100]}...")
@@ -524,7 +644,7 @@ Follow this cycle: PLANNING → CODING → TESTING → DONE
     
     def reset_working_memory(self):
         """Сбрасывает рабочую память для новой задачи"""
-        self.working.reset()
+        self.working.reset()  # Теперь reset есть в WorkingMemory
         self._save_state()
         print("✅ Working memory reset")
     

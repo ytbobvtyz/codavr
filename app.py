@@ -29,7 +29,13 @@ def switch_session(session_id: str):
             "content": msg["content"]
         })
     st.rerun()
-
+    
+def load_sessions_for_profile(profile_id: str):
+    """Загружает только сессии текущего профиля"""
+    return st.session_state.persistence.list_sessions(
+        profile_id=profile_id,
+        limit=20
+    )
 def create_new_session():
     profile_id = st.session_state.assistant.get_current_profile_id()
     new_id = st.session_state.persistence.create_session(
@@ -87,7 +93,8 @@ with st.sidebar:
     st.divider()
     
     # Список всех сессий
-    sessions = st.session_state.persistence.list_sessions(limit=20)
+    profile_id = st.session_state.assistant.get_current_profile_id()
+    sessions = load_sessions_for_profile(profile_id)
     
     for sess in sessions:
         col1, col2 = st.columns([4, 1])
@@ -147,8 +154,8 @@ with st.sidebar:
                 if profile["id"] != active_profile_id:
                     if st.button("Switch", key=f"switch_{profile['id']}"):
                         st.session_state.assistant.switch_profile(profile["id"])
-    
-                        # Создаём новую сессию для нового профиля или загружаем последнюю
+                        
+                        # Загружаем сессии нового профиля
                         new_profile_id = profile["id"]
                         sessions = st.session_state.persistence.list_sessions(
                             profile_id=new_profile_id,
@@ -156,10 +163,8 @@ with st.sidebar:
                         )
                         
                         if sessions:
-                            # Загружаем последнюю сессию профиля
                             switch_session(sessions[0]["session_id"])
                         else:
-                            # Создаём новую сессию
                             new_session_id = st.session_state.persistence.create_session(
                                 "New conversation",
                                 profile_id=new_profile_id
@@ -276,41 +281,49 @@ with st.sidebar:
     # ===== РАБОЧАЯ ПАМЯТЬ =====
     with st.expander("⚙️ Working Memory", expanded=True):
         working = assistant.working
+        task = working.task  # TaskContext объект
         
-        if working.goal:
-            st.markdown(f"**🎯 Goal:** {working.goal}")
+        # Цель задачи
+        if task.goal:
+            st.markdown(f"**🎯 Goal:** {task.goal}")
         else:
             st.caption("No active goal")
         
-        st.markdown(f"**📊 Status:** `{working.status}`")
+        # Состояние Task State Machine
+        st.markdown("**🔄 Task State:**")
+        state_icons = {"planning": "📋", "execution": "⚙️", "validation": "🔍", "done": "✅"}
+        state_icon = state_icons.get(task.state.value, "📌")
+        st.markdown(f"{state_icon} **{task.state.value.upper()}**")
         
-        if working.tasks:
-            st.markdown("**✅ Tasks:**")
-            for task in working.tasks:
-                icon = "✅" if task["status"] == "done" else "🔄" if task["status"] == "in_progress" else "⏳"
-                st.text(f"{icon} {task['name']} ({task['status']})")
+        # Текущий и следующий шаг
+        if task.current_step:
+            st.markdown(f"**📍 Current step:** {task.current_step}")
         
-        if working.next_steps:
-            st.markdown("**➡️ Next Steps:**")
-            for step in working.next_steps:
-                st.text(f"• {step}")
+        if task.next_step:
+            st.markdown(f"**➡️ Next step:** {task.next_step}")
         
+        # Ожидание от пользователя
+        if task.expected_from_user:
+            st.info(f"⏳ Expected: {task.expected_from_user}")
+        
+        # Подзадачи (subtasks)
+        if task.subtasks:
+            st.markdown("**✅ Subtasks:**")
+            for subtask in task.subtasks:
+                icon = "✅" if subtask["status"] == "done" else "🔄" if subtask["status"] == "in_progress" else "⏳"
+                st.text(f"{icon} {subtask['name']} ({subtask['status']})")
+        
+        # Файлы
         if working.files:
             st.markdown("**📁 Files:**")
             for f in working.files:
                 st.code(f, language="python")
         
-        if working.tech_stack:
-            st.markdown(f"**🛠️ Tech Stack:** {', '.join(working.tech_stack)}")
-        
-        if working.decisions:
-            st.markdown("**💡 Decisions:**")
-            for key, value in working.decisions.items():
-                st.text(f"{key}: {value}")
-        
+        # Блокеры
         if working.blockers:
             st.warning(f"⚠️ Blockers: {', '.join(working.blockers)}")
         
+        # Кнопки управления
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🔄 Reset Working Memory"):
@@ -320,7 +333,22 @@ with st.sidebar:
             if st.button("🗑️ Clear Short-term"):
                 assistant.clear_short_term()
                 st.rerun()
-    
+        
+        # Дополнительная информация (опционально)
+        with st.expander("📊 Task Progress", expanded=False):
+            # Прогресс по подзадачам
+            if task.subtasks:
+                done_count = sum(1 for t in task.subtasks if t["status"] == "done")
+                total_count = len(task.subtasks)
+                st.progress(done_count / total_count if total_count > 0 else 0)
+                st.caption(f"Progress: {done_count}/{total_count} subtasks completed")
+            
+            # История переходов
+            if task.transitions:
+                st.markdown("**Transition History:**")
+                for t in task.transitions[-5:]:  # последние 5
+                    st.caption(f"  {t['from']} → {t['to']} ({t['timestamp'][:16]})")
+
     # ===== ДОЛГОВРЕМЕННАЯ ПАМЯТЬ =====
     with st.expander("💾 Long-Term Memory", expanded=False):
         memory_types = ["user_preference", "code_pattern", "arch_decision", "lesson_learned"]
