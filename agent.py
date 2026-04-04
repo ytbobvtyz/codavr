@@ -8,15 +8,16 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 from memory import (
-    ShortTermMemory, 
-    WorkingMemory, 
-    LongTermMemory, 
+    ShortTermMemory,
+    WorkingMemory,
+    LongTermMemory,
     MemoryEntry,
     ProfileManager,
     PersistenceManager
 )
 
 from memory.persistence import PersistenceManager
+from invariant_validator import InvariantValidator, validate_input, validate_output
 
 load_dotenv()
 
@@ -421,18 +422,28 @@ class CodeAssistant:
     def ask(self, user_input: str) -> str:
         """Основной метод для общения с ассистентом"""
         profile_id = self.profile_manager.get_active_profile()
-        
+
+        # 0. ВАЛИДАЦИЯ ВВОДА ПОЛЬЗОВАТЕЛЯ
+        is_valid, invariant_name, violation_reason = validate_input(user_input)
+        if not is_valid:
+            description = InvariantValidator.get_invariant_description(invariant_name)
+            return (f"❌ **Запрос отклонён**\n\n"
+                   f"Нарушение инварианта: **{invariant_name}**\n"
+                   f"Описание: {description}\n"
+                   f"Причина: {violation_reason}\n\n"
+                   f"Пожалуйста, переформулируйте запрос в соответствии с ограничениями.")
+
         # Проверяем, первое ли это сообщение в сессии
         existing_messages = self.persistence.load_conversation(
             session_id=self.session_id,
             profile_id=profile_id
         )
         is_first_message = len(existing_messages) == 0
-        
+
         # Если первое сообщение — обновляем название сессии
         if is_first_message:
             self.update_session_title(user_input)
-        
+
         # Сохраняем сообщение пользователя
         self.persistence.save_message(
             "user", user_input,
@@ -447,75 +458,105 @@ class CodeAssistant:
 
         # Сохраняем сообщение пользователя в БД
         self.persistence.save_message("user", user_input, session_id=self.session_id)
-        
+
         # 1. Восстанавливаем релевантные воспоминания
         relevant_memories = self._recall_relevant_memories(user_input)
-        
+
         # 2. Строим промпты
         system_prompt = self._build_system_prompt(relevant_memories)
         user_prompt = self._build_user_prompt(user_input)
-        
+
         # 3. Добавляем текущее сообщение в краткосрочную память
         self.short_term.add("user", user_input)
-        
+
         # 4. Формируем messages для API
         messages = [
             {"role": "system", "content": system_prompt},
         ]
-        
+
         messages.extend(self.short_term.get_recent_window())
         messages.append({"role": "user", "content": user_prompt})
+
+        # 5. Retry mechanism for response validation
+        max_retries = 2
+        retry_count = 0
         
-        try:
-            # 5. Первый вызов
-            response = self.client.chat.completions.create(
-                model=self.main_model,
-                messages=messages,
-                tools=self.tools,
-                tool_choice="auto",
-                temperature=0.7,
-            )
-            
-            assistant_message = response.choices[0].message
-            
-            # 6. Обрабатываем tool calls
-            if assistant_message.tool_calls:
-                self.short_term.add("assistant", json.dumps([tc.function.name for tc in assistant_message.tool_calls]))
-                tool_results = self._execute_tool_calls(assistant_message.tool_calls)
-                
-                messages.append(assistant_message)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": assistant_message.tool_calls[0].id,
-                    "content": tool_results
-                })
-                
-                final_response = self.client.chat.completions.create(
+        while retry_count <= max_retries:
+            try:
+                # 6. API вызов
+                response = self.client.chat.completions.create(
                     model=self.main_model,
                     messages=messages,
+                    tools=self.tools,
+                    tool_choice="auto",
                     temperature=0.7,
                 )
-                answer = final_response.choices[0].message.content
-            else:
-                answer = assistant_message.content
-            
-            # 7. Сохраняем ответ
-            self.short_term.add("assistant", answer)
-            # После ответа сохраняем
-            self.persistence.save_message(
-                "assistant", answer,
-                session_id=self.session_id,
-                profile_id=profile_id
-            )
-            self._save_state()
-            
-            return answer
-            
-        except Exception as e:
-            error_msg = str(e)
-            if "api_key" in error_msg.lower() or "unauthorized" in error_msg.lower() or "401" in error_msg:
-                return "❌ API key is invalid. Please check your OPENROUTER_API_KEY in .env file."
-            return f"❌ Error: {error_msg}"
+                
+                assistant_message = response.choices[0].message
+                
+                # 7. Обрабатываем tool calls
+                if assistant_message.tool_calls:
+                    self.short_term.add("assistant", json.dumps([tc.function.name for tc in assistant_message.tool_calls]))
+                    tool_results = self._execute_tool_calls(assistant_message.tool_calls)
+                    
+                    messages.append(assistant_message)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": assistant_message.tool_calls[0].id,
+                        "content": tool_results
+                    })
+                    
+                    final_response = self.client.chat.completions.create(
+                        model=self.main_model,
+                        messages=messages,
+                        temperature=0.7,
+                    )
+                    answer = final_response.choices[0].message.content
+                else:
+                    answer = assistant_message.content
+                
+                # 8. ВАЛИДАЦИЯ ОТВЕТА АГЕНТА
+                is_valid_response, response_invariant_name, violation_reason = validate_output(answer)
+                
+                if not is_valid_response:
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        # Add violation info to system prompt for retry
+                        description = InvariantValidator.get_invariant_description(response_invariant_name)
+                        violation_msg = (f"\n\n⚠️ **CRITICAL: Your previous response violated tech invariant '{response_invariant_name}'**\n"
+                                       f"Invariant: {description}\n"
+                                       f"Violation: {violation_reason}\n\n"
+                                       f"**You MUST comply with all tech invariants in your next response.**\n"
+                                       f"Do NOT suggest paid APIs, heavy dependencies, PostgreSQL, or Python 3.12+ features without compatibility checks.")
+                        
+                        # Modify system prompt to reinforce constraints
+                        messages[0]["content"] += violation_msg
+                        continue  # Retry
+                    else:
+                        # Max retries exceeded - return error
+                        description = InvariantValidator.get_invariant_description(response_invariant_name)
+                        return (f"❌ **Ошибка валидации ответа**\n\n"
+                               f"Агент несколько раз нарушил инвариант: **{response_invariant_name}**\n"
+                               f"Описание: {description}\n"
+                               f"Причина: {violation_reason}\n\n"
+                               f"Попробуйте переформулировать запрос или изменить требования.")
+                
+                # 9. Сохраняем ответ
+                self.short_term.add("assistant", answer)
+                self.persistence.save_message(
+                    "assistant", answer,
+                    session_id=self.session_id,
+                    profile_id=profile_id
+                )
+                self._save_state()
+                
+                return answer
+                
+            except Exception as e:
+                error_msg = str(e)
+                if "api_key" in error_msg.lower() or "unauthorized" in error_msg.lower() or "401" in error_msg:
+                    return "❌ API key is invalid. Please check your OPENROUTER_API_KEY in .env file."
+                return f"❌ Error: {error_msg}"
     
     def show_memory_state(self):
         """Отладка: показывает состояние всей памяти"""
