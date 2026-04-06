@@ -18,6 +18,7 @@ from memory import (
 
 from memory.persistence import PersistenceManager
 from invariant_validator import InvariantValidator, validate_input, validate_output
+import re
 
 load_dotenv()
 
@@ -56,8 +57,8 @@ class CodeAssistant:
         )
         
         # Модели
-        self.main_model = "stepfun/step-3.5-flash:free" # stepfun/step-3.5-flash:free
-        self.summarizer_model = "arcee-ai/trinity-large-preview:free" #nvidia/nemotron-3-nano-30b-a3b:free
+        self.main_model = "openrouter/free" # stepfun/step-3.5-flash:free
+        self.summarizer_model = "openrouter/free" #nvidia/nemotron-3-nano-30b-a3b:free arcee-ai/trinity-large-preview:free
         
         # Инициализация памяти
         self.short_term = ShortTermMemory(
@@ -212,20 +213,6 @@ class CodeAssistant:
             {
                 "type": "function",
                 "function": {
-                    "name": "add_blocker",
-                    "description": "Report a blocker that prevents progress",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "blocker": {"type": "string"}
-                        },
-                        "required": ["blocker"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
                     "name": "resolve_blocker",
                     "description": "Mark a blocker as resolved",
                     "parameters": {
@@ -306,11 +293,26 @@ class CodeAssistant:
     4. Always call transition_state tool when changing states
     5. Be concise — don't over-explain
 
-    **Tools:**
-    - transition_state(target_state, reason)
-    - update_current_step(current_step, next_step)
-    - update_working_memory(goal, files, blockers)
-    - save_to_long_term_memory(content, entry_type)
+    ## Tool Usage Rules (CRITICAL)
+
+    **IMPORTANT: How to use tools**
+    - Tools are called using the system's tool calling mechanism, NOT as text in your response
+    - NEVER write tool calls as plain text like: update_working_memory(...) or
+      "I'll call update_working_memory(...)". This is a critical error.
+    - When you need to use a tool, the system will provide a tool_call block. Just use it naturally.
+    - The system automatically detects when you want to use a tool based on your intent.
+    - DO NOT mention tool names in your response text. Use them silently via the tool calling mechanism.
+
+    **Available Tools:**
+    - transition_state(target_state, reason) - Change task state
+    - update_current_step(current_step, next_step) - Update progress
+    - update_working_memory(goal, files, blockers) - Update task context
+    - save_to_long_term_memory(content, entry_type, importance, tags) - Save important info
+    - add_task(name, status) - Add subtask
+    - update_task_status(name, status) - Update subtask
+    - add_blocker(blocker) - Report blocker
+    - resolve_blocker(blocker) - Resolve blocker
+    - set_expected_from_user(expected) - Tell user what you expect
 
     ## How to complete a task
     When user says ANY of these, transition to DONE:
@@ -417,6 +419,44 @@ class CodeAssistant:
         
         return "\n".join(results) if results else "No tools executed"
 
+    def _sanitize_response(self, text: str) -> str:
+        """
+        Удаляет синтаксис вызова инструментов из текстового ответа модели.
+        Модель иногда вставляет вызовы инструментов как текст вместо использования
+        механизма tool_calls. Этот метод очищает ответ перед возвратом пользователю.
+        """
+        if not text:
+            return text
+            
+        cleaned = text
+        
+        # Удаляем XML-подобные теги инструментов
+        cleaned = re.sub(r'<function=[^>]+>.*?</function=[^>]+>', '', cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r'<tool>.*?</tool>', '', cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r'<invoke>.*?</invoke>', '', cleaned, flags=re.DOTALL)
+        
+        # Удаляем JSON блоки с вызовами функций
+        cleaned = re.sub(r'\{\s*"name"\s*:\s*"[^"]+",\s*"arguments"\s*:.*?\}', '', cleaned, flags=re.DOTALL)
+        
+        # Удаляем строки, выглядящие как вызовы функций
+        tool_names = [
+            "update_working_memory", "save_to_long_term_memory", "add_task",
+            "update_task_status", "add_blocker", "resolve_blocker",
+            "transition_state", "update_current_step", "set_expected_from_user"
+        ]
+        
+        for tool_name in tool_names:
+            pattern = rf'\b{re.escape(tool_name)}\s*\([^)]*\)'
+            cleaned = re.sub(pattern, '', cleaned, flags=re.DOTALL)
+            pattern_multiline = rf'\b{re.escape(tool_name)}\s*\(\s*[^)]*?\)'
+            cleaned = re.sub(pattern_multiline, '', cleaned, flags=re.DOTALL)
+        
+        # Удаляем пустые строки
+        lines = [line.strip() for line in cleaned.split('\n')]
+        cleaned = '\n'.join(line for line in lines if line)
+        
+        return cleaned.strip()
+
 
 
     def ask(self, user_input: str) -> str:
@@ -509,11 +549,16 @@ class CodeAssistant:
                     final_response = self.client.chat.completions.create(
                         model=self.main_model,
                         messages=messages,
+                        tools=self.tools,
+                        tool_choice="auto",
                         temperature=0.7,
                     )
                     answer = final_response.choices[0].message.content
                 else:
                     answer = assistant_message.content
+                
+                # Очищаем ответ от возможного синтаксиса вызова инструментов
+                answer = self._sanitize_response(answer)
                 
                 # 8. ВАЛИДАЦИЯ ОТВЕТА АГЕНТА
                 is_valid_response, response_invariant_name, violation_reason = validate_output(answer)
@@ -601,7 +646,11 @@ class CodeAssistant:
             profile_id=profile_id
         )
         for msg in saved_messages:
-            self.short_term.add(msg["role"], msg["content"])
+            if msg is None:
+                continue
+            role = msg.get("role", "unknown")
+            content = msg.get("content") or ""
+            self.short_term.add(role, content)
         
         print(f"📂 Loaded {len(saved_messages)} messages from history (profile: {profile_id})")
         

@@ -24,9 +24,11 @@ def switch_session(session_id: str):
         profile_id=profile_id
     )
     for msg in saved_messages:
+        if msg is None:
+            continue
         st.session_state.messages.append({
-            "role": msg["role"], 
-            "content": msg["content"]
+            "role": msg.get("role", "unknown"),
+            "content": msg.get("content") or ""
         })
     st.rerun()
     
@@ -76,9 +78,11 @@ if "current_session_id" not in st.session_state:
         session_id=st.session_state.current_session_id
     )
     for msg in saved_messages:
+        if msg is None:
+            continue
         st.session_state.messages.append({
-            "role": msg["role"], 
-            "content": msg["content"]
+            "role": msg.get("role", "unknown"),
+            "content": msg.get("content") or ""
         })
 
 # ===== SIDEBAR =====
@@ -271,8 +275,12 @@ with st.sidebar:
         recent = assistant.short_term.get_recent_window()
         if recent:
             for msg in recent[-5:]:
-                role_icon = "👤" if msg["role"] == "user" else "🤖"
-                st.caption(f"{role_icon} **{msg['role']}:** {msg['content'][:100]}...")
+                if msg is None:
+                    continue
+                role_icon = "👤" if msg.get("role") == "user" else "🤖"
+                content = msg.get("content") or ""
+                preview = content[:100] + "..." if len(content) > 100 else content
+                st.caption(f"{role_icon} **{msg.get('role', 'unknown')}:** {preview}")
         else:
             st.caption("No messages yet")
         
@@ -390,8 +398,12 @@ st.caption(f"Model: {st.session_state.assistant.main_model} | Session: {st.sessi
 
 # Чат
 for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+    if msg is None:
+        continue
+    role = msg.get("role", "unknown")
+    content = msg.get("content") or ""
+    with st.chat_message(role):
+        st.markdown(content)
 
 if prompt := st.chat_input("Что нужно сделать в проекте?"):
     # Проверяем, первое ли это сообщение

@@ -18,6 +18,24 @@ class InvariantValidator:
     
     # Invariant definitions with violation keywords/patterns
     INVARIANTS = {
+        "no_tool_call_leak": {
+            "description": "Ответ не должен содержать синтаксис вызова инструментов в текстовом виде",
+            "violation_patterns": [
+                r'<function=[^>]+>.*?</function=[^>]+>',
+                r'<tool>.*?</tool>',
+                r'<invoke>.*?</invoke>',
+                r'\{\s*"name"\s*:\s*"[^"]+",\s*"arguments"\s*:.*?\}',
+                r'\bupdate_working_memory\s*\(',
+                r'\bsave_to_long_term_memory\s*\(',
+                r'\badd_task\s*\(',
+                r'\bupdate_task_status\s*\(',
+                r'\badd_blocker\s*\(',
+                r'\bresolve_blocker\s*\(',
+                r'\btransition_state\s*\(',
+                r'\bupdate_current_step\s*\(',
+                r'\bset_expected_from_user\s*\('
+            ]
+        },
         "free_api_only": {
             "description": "Только бесплатные API. Никаких платных подписок.",
             "violation_keywords": [
@@ -136,6 +154,13 @@ class InvariantValidator:
         if not response:
             return True, None, None
             
+        # Check for tool call syntax leakage FIRST (highest priority)
+        tool_leak_invariant = cls.INVARIANTS.get("no_tool_call_leak")
+        if tool_leak_invariant:
+            for pattern in tool_leak_invariant["violation_patterns"]:
+                if re.search(pattern, response, flags=re.DOTALL | re.IGNORECASE):
+                    return False, "no_tool_call_leak", f"Обнаружен синтаксис вызова инструментов в тексте ответа"
+        
         response_lower = response.lower()
         
         # Check free_api_only - agent suggesting paid services

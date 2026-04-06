@@ -48,6 +48,12 @@ def test_agent_response_validation():
         ("import torch", False, "minimal_dependencies"),
         ("Here's code using match-case (Python 3.10+)", True, None),
         ("Use the free API from OpenRouter", True, None),
+        # Tool call leak tests
+        ("I'll call update_working_memory(goal='test')", False, "no_tool_call_leak"),
+        ("<function=transition_state>...</function=transition_state>", False, "no_tool_call_leak"),
+        ("<tool>update_current_step(...)</tool>", False, "no_tool_call_leak"),
+        ("{\"name\": \"add_task\", \"arguments\": {\"name\": \"test\"}}", False, "no_tool_call_leak"),
+        ("Normal response without tool calls", True, None),
     ]
     
     for response, expected_valid, expected_invariant in test_cases:

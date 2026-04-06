@@ -44,6 +44,7 @@ class TaskContext:
     # Метаданные
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    last_error: Optional[str] = None
     
     # Допустимые переходы между состояниями
     TRANSITIONS = {
@@ -62,10 +63,17 @@ class TaskContext:
         Выполняет переход в новое состояние.
         Возвращает True если переход успешен.
         """
-        if not self.can_transition(new_state):
+        # Helper to format state names for error messages
+        def fmt(state: TaskState) -> str:
+            return state.value
+        
+        # Проверяем, не ли мы пытаемся перейти в то же состояние
+        if self.state == new_state:
+            self.last_error = f"Невозможно перейти из {fmt(self.state)} в {fmt(new_state)}"
             return False
         
-        if self.state == new_state:
+        if not self.can_transition(new_state):
+            self.last_error = f"Невозможно перейти из {fmt(self.state)} в {fmt(new_state)}"
             return False
         
         # Логируем переход
@@ -79,6 +87,7 @@ class TaskContext:
         # Обновляем состояние
         self.state = new_state
         self.updated_at = datetime.now().isoformat()
+        self.last_error = None
         
         # Автоматические действия при переходах
         if new_state == TaskState.EXECUTION:

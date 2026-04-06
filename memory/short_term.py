@@ -93,7 +93,11 @@ class ShortTermMemory:
         """Форматирует сообщения в текст (без суммаризации)"""
         lines = []
         for msg in messages:
-            lines.append(f"{msg.role.upper()}: {msg.content}")
+            if msg is None:
+                continue
+            role = msg.role if msg.role else "unknown"
+            content = msg.content if msg.content else ""
+            lines.append(f"{role.upper()}: {content}")
         return "\n".join(lines)
     
     def get_recent_window(self) -> List[Dict]:
@@ -102,7 +106,12 @@ class ShortTermMemory:
         (готовый массив для messages)
         """
         recent = self._all_messages[-self.window_size:]
-        return [msg.to_dict() for msg in recent]
+        result = []
+        for msg in recent:
+            if msg is None:
+                continue
+            result.append(msg.to_dict())
+        return result
     
     def get_context(self) -> str:
         """
@@ -128,7 +137,12 @@ class ShortTermMemory:
     
     def get_full_history(self) -> List[Dict]:
         """Возвращает ВСЮ историю (для отладки)"""
-        return [msg.to_dict() for msg in self._all_messages]
+        result = []
+        for msg in self._all_messages:
+            if msg is None:
+                continue
+            result.append(msg.to_dict())
+        return result
     
     def clear(self) -> None:
         """Очищает всю память"""
