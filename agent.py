@@ -58,11 +58,11 @@ class CodeAssistant:
         
         # Модели
         self.main_model = "openrouter/free" # stepfun/step-3.5-flash:free
-        self.summarizer_model = "openrouter/free" #nvidia/nemotron-3-nano-30b-a3b:free arcee-ai/trinity-large-preview:free
+        self.summarizer_model = "openrosuter/free" #nvidia/nemotron-3-nano-30b-a3b:free arcee-ai/trinity-large-preview:free
         
         # Инициализация памяти
         self.short_term = ShortTermMemory(
-            window_size=5,
+            window_size=15,
             summarizer=self._summarize_messages
         )
         self.long_term = LongTermMemory("assistant_memory.db")
@@ -247,7 +247,7 @@ class CodeAssistant:
                 model=self.summarizer_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
-                max_tokens=200,
+                max_tokens=2000,
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -273,26 +273,33 @@ class CodeAssistant:
         unified_rules = """
     ## Task States & Transitions
 
-    You have 4 states: PLANNING, EXECUTION, VALIDATION, DONE.
-
-    **When to transition:**
+    Есть обязательные четыре состояния любого диалога: PLANNING, EXECUTION, VALIDATION, DONE.
+    Задача начинается всегда со стадии PLANNING
+    **Когда переходим:**
 
     | Current State | Trigger | Next State |
     |---------------|---------|------------|
-    | PLANNING | User confirms plan OR says "start" | EXECUTION |
-    | EXECUTION | Code is written | VALIDATION |
-    | EXECUTION | Architecture is wrong | PLANNING |
-    | VALIDATION | Tests pass AND user says "done" or "accept" | DONE |
-    | VALIDATION | Tests fail or user says "fix" | EXECUTION |
-    | DONE | User asks new question | PLANNING |
+    | PLANNING | Пользователь подтвердил план или выразил готовность приступать к реализации | EXECUTION |
+    | EXECUTION | Код написан, пользователь прямо или косвенно подтвердил выполнение | VALIDATION |
+    | EXECUTION | В ходе написания кода возникла необходимость уточнить архитектуру, спланировать дополниетльные модули | PLANNING |
+    | VALIDATION | Тест пройден или пользователь подтвердил выполнение | DONE |
+    | VALIDATION | Тест не пройден или пользователь попросил исправить | EXECUTION |
+    | DONE | Пользователь задал новый вопрос | PLANNING |
 
     **CRITICAL RULES:**
-    1. Do NOT ask clarifying questions unless impossible to proceed
-    2. When user says "write code" — write code immediately, don't ask
-    3. When tests pass and user confirms — transition to DONE
-    4. Always call transition_state tool when changing states
-    5. Be concise — don't over-explain
+    1. Допустимые переходы (все остальные - запрещены? даже по просьбе пользователя):
+    PLANNING->EXECUTION
+    EXECUTION->VALIDATION
+    EXECUTION->PLANNING
+    VALIDATION->DONE
+    VALIDATION->EXECUTION
+    PLANNING->DONE
 
+    2. Всегда вызывай transition_state tool когда нужно поменять состояние
+    3. Запрещены пустые ответы пользователю, всегда возвращай хотя бы короткий ответ, описывающий текущую стадию задачи
+    4. Запрещено завершать задачу, пока она не прошла все четыре стадии разработки.
+    5. Даже если пользователь говорит, что задача выполнена, ты обязан просто перейти к следующему шагу по цепочке состояний, а не завршать задачу. Задача может завершится, только пойдя все 4 этапа
+    6. Всегда начинай диалог с плана реализации.
     ## Tool Usage Rules (CRITICAL)
 
     **IMPORTANT: How to use tools**
@@ -303,6 +310,7 @@ class CodeAssistant:
     - The system automatically detects when you want to use a tool based on your intent.
     - DO NOT mention tool names in your response text. Use them silently via the tool calling mechanism.
 
+    
     **Available Tools:**
     - transition_state(target_state, reason) - Change task state
     - update_current_step(current_step, next_step) - Update progress
@@ -313,17 +321,6 @@ class CodeAssistant:
     - add_blocker(blocker) - Report blocker
     - resolve_blocker(blocker) - Resolve blocker
     - set_expected_from_user(expected) - Tell user what you expect
-
-    ## How to complete a task
-    When user says ANY of these, transition to DONE:
-    - "задача завершена"
-    - "всё готово"
-    - "принимаю"
-    - "done"
-    - "закрывай"
-
-    Example:
-    User: "задача завершена" → You call transition_state(target_state="done", reason="user confirmed")
     """
         
         return f"""{profile_content}
