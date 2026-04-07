@@ -95,3 +95,29 @@ class MCPManager:
         """Отключает все серверы"""
         for server_id in list(self.connections.keys()):
             await self.disconnect(server_id)
+
+    async def connect_remote(self, server_id: str, url: str, name: str = None) -> bool:
+        """
+        Подключается к удалённому MCP серверу через HTTP
+        """
+        from mcp_integration.http_client import RemoteMCPClient
+        
+        if server_id in self.connections:
+            print(f"⚠️ Server {server_id} already connected")
+            return False
+        
+        client = RemoteMCPClient(url)
+        success = await client.connect()
+        
+        if success:
+            self.connections[server_id] = {
+                "client": client,
+                "tools": client.tools,
+                "status": "connected",
+                "name": name or server_id,
+                "type": "remote",
+                "url": url
+            }
+            print(f"✅ Remote server '{server_id}' connected with {len(client.tools)} tools")
+        
+        return success

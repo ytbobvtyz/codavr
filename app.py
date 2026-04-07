@@ -263,95 +263,238 @@ with st.sidebar:
     
     st.divider()
 
- # ===== ВЫБОР MCP =====
+  # ===== ВЫБОР MCP =====
     st.divider()
     st.title("🔌 MCP Connections")
 
-    # Инициализация MCP менеджера в session_state
-    if "mcp_manager" not in st.session_state:
-        st.session_state.mcp_manager = MCPManager()
-        st.session_state.mcp_connections_initialized = False
+    # Инициализация в session_state
+    if "mcp_local_client" not in st.session_state:
+        st.session_state.mcp_local_client = None
+        st.session_state.mcp_local_tools = []
+        st.session_state.mcp_local_connected = False
+    
+    if "mcp_remote_tools" not in st.session_state:
+        st.session_state.mcp_remote_tools = []
+        st.session_state.mcp_remote_connected = False
+        st.session_state.mcp_remote_url = ""
 
-    # Функция для инициализации подключений
-    async def init_mcp_connections():
-        if not st.session_state.mcp_connections_initialized:
-            # Подключаем локальный echo сервер (исправленный путь)
-            echo_server_path = "mcp_integration/servers/echo_server.py"
-            if os.path.exists(echo_server_path):
-                await st.session_state.mcp_manager.connect_local(
-                    server_id="echo_server",
-                    script_path=echo_server_path,
-                    name="Echo Test Server"
-                )
-            st.session_state.mcp_connections_initialized = True
+    # Вкладки для разных типов подключений
+    tab_local, tab_remote = st.tabs(["💻 Local MCP Server (stdio)", "🌐 Remote MCP Server (HTTP)"])
 
-    # Запускаем инициализацию (в фоне)
-    if not st.session_state.mcp_connections_initialized:
-        try:
-            asyncio.run(init_mcp_connections())
-        except RuntimeError:
-            # Если event loop уже запущен (например в Streamlit)
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(init_mcp_connections())
-
-    # Отображаем текущие подключения
-    connections = st.session_state.mcp_manager.get_connections_info()
-
-    if connections:
-        for conn in connections:
-            col1, col2, col3 = st.columns([2, 1, 1])
-            with col1:
-                st.markdown(f"**{conn['name']}**")
-                st.caption(f"{conn['tools_count']} tools | {conn['type']}")
-            with col2:
-                if conn['status'] == "connected":
-                    st.success("✅")
-                else:
-                    st.warning("⚪")
-            with col3:
-                if st.button("Disconnect", key=f"disconnect_{conn['id']}"):
-                    try:
-                        asyncio.run(st.session_state.mcp_manager.disconnect(conn['id']))
-                    except RuntimeError:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        loop.run_until_complete(st.session_state.mcp_manager.disconnect(conn['id']))
-                    st.rerun()
-    else:
-        st.info("No MCP connections. Local server will auto-connect.")
-
-    # Кнопка ручного подключения
-    with st.expander("➕ Add MCP Server", expanded=False):
-        server_type = st.selectbox("Server Type", ["Local (stdio)", "Remote (HTTP) - coming soon"])
+    # ========== ЛОКАЛЬНЫЙ СЕРВЕР ==========
+    with tab_local:
+        st.markdown("### Подключение к локальному MCP серверу")
         
-        if server_type == "Local (stdio)":
-            server_path = st.text_input("Script Path", value="mcp_integration/servers/echo_server.py")
-            server_name = st.text_input("Display Name", value="Custom Server")
-            
-            if st.button("Connect"):
-                async def connect():
-                    await st.session_state.mcp_manager.connect_local(
-                        server_id="custom_" + str(hash(server_path)),
-                        script_path=server_path,
-                        name=server_name
-                    )
+        server_path = st.text_input(
+            "Путь к скрипту сервера",
+            value="mcp_integration/servers/echo_server.py",
+            help="Укажи полный путь к Python файлу с MCP сервером"
+        )
+        
+        server_name = st.text_input("Имя сервера", value="Echo Server")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🔌 Подключить локальный сервер", key="connect_local_btn"):
+                if not os.path.exists(server_path):
+                    st.error(f"❌ Файл не найден: {server_path}")
+                else:
+                    with st.spinner(f"Подключение к {server_path}..."):
+                        try:
+                            import asyncio
+                            from mcp_integration.client import MCPClient
+                            
+                            async def connect_local():
+                                client = MCPClient()
+                                success = await client.connect(server_path, server_name)
+                                return client, success
+                            
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            client, success = loop.run_until_complete(connect_local())
+                            loop.close()
+                            
+                            if success:
+                                st.session_state.mcp_local_client = client
+                                st.session_state.mcp_local_tools = list(client.tools.values())
+                                st.session_state.mcp_local_connected = True
+                                st.success(f"✅ Подключено к {server_name}")
+                                st.rerun()
+                            else:
+                                st.error("❌ Не удалось подключиться")
+                        except Exception as e:
+                            st.error(f"❌ Ошибка: {e}")
+        
+        with col2:
+            if st.session_state.mcp_local_connected and st.button("🔌 Отключить локальный сервер", key="disconnect_local_btn"):
+                async def disconnect_local():
+                    if st.session_state.mcp_local_client:
+                        await st.session_state.mcp_local_client.cleanup()
+                
                 try:
-                    asyncio.run(connect())
-                except RuntimeError:
+                    import asyncio
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
-                    loop.run_until_complete(connect())
+                    loop.run_until_complete(disconnect_local())
+                    loop.close()
+                except:
+                    pass
+                
+                st.session_state.mcp_local_client = None
+                st.session_state.mcp_local_tools = []
+                st.session_state.mcp_local_connected = False
+                st.success("🔌 Отключено")
                 st.rerun()
+        
+        # Отображение статуса и инструментов локального сервера
+        if st.session_state.mcp_local_connected:
+            st.success(f"✅ **Статус:** Подключено к {server_name}")
+            
+            tools = st.session_state.mcp_local_tools
+            if tools:
+                st.markdown(f"### 🔧 Доступные инструменты ({len(tools)})")
+                for tool in tools:
+                    with st.expander(f"🔧 {tool['name']}"):
+                        st.markdown(f"**Описание:** {tool.get('description', 'Нет описания')}")
+                        if tool.get('input_schema'):
+                            st.markdown("**Параметры:**")
+                            st.json(tool['input_schema'])
+            else:
+                st.warning("Нет доступных инструментов")
+        else:
+            st.info("⚪ Не подключено. Нажми 'Подключить локальный сервер'")
 
-    # Показываем активные инструменты
-    all_tools = st.session_state.mcp_manager.get_all_tools()
-    if all_tools:
-        with st.expander("🔧 Active Tools", expanded=False):
-            for tool in all_tools[:10]:
-                st.caption(f"• {tool['server_name']} :: {tool['tool_name']}")
-            if len(all_tools) > 10:
-                st.caption(f"... and {len(all_tools) - 10} more")
+    # ========== УДАЛЁННЫЙ СЕРВЕР ==========
+    with tab_remote:
+        st.markdown("### Подключение к удалённому MCP серверу")
+        
+        # Предустановленные тестовые серверы
+        test_servers = {
+            "Выбрать из списка": "",
+            "Anthropic Test Server": "https://example-server.modelcontextprotocol.io/mcp",
+            "MCP Echo Server": "https://mcp-echo-server.fly.dev/mcp",
+        }
+        
+        selected_preset = st.selectbox(
+            "Выбери тестовый сервер или введи свой URL",
+            list(test_servers.keys())
+        )
+        
+        if selected_preset != "Выбрать из списка":
+            remote_url = test_servers[selected_preset]
+            st.info(f"📡 URL: {remote_url}")
+        else:
+            remote_url = st.text_input(
+                "Введите URL MCP сервера",
+                placeholder="https://example.com/mcp",
+                help="URL должен заканчиваться на /mcp или быть корневым эндпоинтом"
+            )
+        
+        remote_name = st.text_input("Отображаемое имя", value="Remote MCP Server")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🌐 Подключить удалённый сервер", key="connect_remote_btn"):
+                if not remote_url:
+                    st.warning("Введите URL сервера")
+                else:
+                    with st.spinner(f"Подключение к {remote_url}..."):
+                        try:
+                            import httpx
+                            import asyncio
+                            
+                            async def test_remote_connection():
+                                async with httpx.AsyncClient(timeout=30.0) as client:
+                                    # Инициализация
+                                    init_resp = await client.post(
+                                        remote_url,
+                                        json={
+                                            "jsonrpc": "2.0",
+                                            "method": "initialize",
+                                            "params": {
+                                                "protocolVersion": "2024-11-05",
+                                                "capabilities": {}
+                                            },
+                                            "id": 1
+                                        },
+                                        headers={"Content-Type": "application/json"}
+                                    )
+                                    
+                                    if init_resp.status_code != 200:
+                                        return None, f"Init failed: {init_resp.status_code}"
+                                    
+                                    # Получаем инструменты
+                                    tools_resp = await client.post(
+                                        remote_url,
+                                        json={"jsonrpc": "2.0", "method": "tools/list", "id": 2},
+                                        headers={"Content-Type": "application/json"}
+                                    )
+                                    
+                                    if tools_resp.status_code == 200:
+                                        result = tools_resp.json()
+                                        if "result" in result and "tools" in result["result"]:
+                                            return result["result"]["tools"], None
+                                        return None, "Invalid response format"
+                                    return None, f"Tools request failed: {tools_resp.status_code}"
+                            
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            tools, error = loop.run_until_complete(test_remote_connection())
+                            loop.close()
+                            
+                            if tools is not None:
+                                st.session_state.mcp_remote_tools = tools
+                                st.session_state.mcp_remote_connected = True
+                                st.session_state.mcp_remote_url = remote_url
+                                st.success(f"✅ Подключено к {remote_url}")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Ошибка: {error}")
+                        except Exception as e:
+                            st.error(f"❌ Ошибка подключения: {e}")
+        
+        with col2:
+            if st.session_state.mcp_remote_connected and st.button("🔌 Отключить удалённый сервер", key="disconnect_remote_btn"):
+                st.session_state.mcp_remote_tools = []
+                st.session_state.mcp_remote_connected = False
+                st.session_state.mcp_remote_url = ""
+                st.success("🔌 Отключено")
+                st.rerun()
+        
+        # Отображение статуса и инструментов удалённого сервера
+        if st.session_state.mcp_remote_connected:
+            st.success(f"✅ **Статус:** Подключено к {st.session_state.mcp_remote_url}")
+            st.info(f"📡 **Сервер:** {remote_name}")
+            
+            tools = st.session_state.mcp_remote_tools
+            if tools:
+                st.markdown(f"### 🔧 Доступные инструменты ({len(tools)})")
+                for tool in tools:
+                    with st.expander(f"🔧 {tool.get('name', 'Unknown')}"):
+                        st.markdown(f"**Описание:** {tool.get('description', 'Нет описания')}")
+                        if tool.get('inputSchema'):
+                            st.markdown("**Параметры:**")
+                            st.json(tool['inputSchema'])
+            else:
+                st.warning("Нет доступных инструментов")
+        else:
+            st.info("⚪ Не подключено. Введи URL и нажми 'Подключить удалённый сервер'")
+    
+    # Показываем все активные инструменты в одном месте
+    all_tools_count = len(st.session_state.mcp_local_tools) + len(st.session_state.mcp_remote_tools)
+    if all_tools_count > 0:
+        with st.expander(f"📦 Все активные инструменты ({all_tools_count})", expanded=False):
+            if st.session_state.mcp_local_tools:
+                st.markdown("**💻 Локальный сервер:**")
+                for tool in st.session_state.mcp_local_tools:
+                    st.caption(f"• {tool['name']} - {tool.get('description', '')[:60]}")
+            
+            if st.session_state.mcp_remote_tools:
+                st.markdown("**🌐 Удалённый сервер:**")
+                for tool in st.session_state.mcp_remote_tools:
+                    st.caption(f"• {tool.get('name', 'unknown')} - {tool.get('description', '')[:60]}")
                 
     # ===== КРАТКОСРОЧНАЯ ПАМЯТЬ =====
     with st.expander("📝 Short-Term Memory", expanded=True):
