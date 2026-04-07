@@ -1,9 +1,12 @@
 # app.py
 import streamlit as st
+import asyncio
+import os
 from agent import CodeAssistant
 from memory.persistence import PersistenceManager
+from mcp_integration.manager import MCPManager
 
-st.set_page_config(page_title="Code Assistant with Memory", layout="wide")
+st.set_page_config(page_title="CODAVR BETA", layout="wide")
 
 # Инициализация менеджера сессий
 if "persistence" not in st.session_state:
@@ -259,7 +262,97 @@ with st.sidebar:
                 st.error("Profile ID and Name are required")
     
     st.divider()
-    
+
+ # ===== ВЫБОР MCP =====
+    st.divider()
+    st.title("🔌 MCP Connections")
+
+    # Инициализация MCP менеджера в session_state
+    if "mcp_manager" not in st.session_state:
+        st.session_state.mcp_manager = MCPManager()
+        st.session_state.mcp_connections_initialized = False
+
+    # Функция для инициализации подключений
+    async def init_mcp_connections():
+        if not st.session_state.mcp_connections_initialized:
+            # Подключаем локальный echo сервер (исправленный путь)
+            echo_server_path = "mcp_integration/servers/echo_server.py"
+            if os.path.exists(echo_server_path):
+                await st.session_state.mcp_manager.connect_local(
+                    server_id="echo_server",
+                    script_path=echo_server_path,
+                    name="Echo Test Server"
+                )
+            st.session_state.mcp_connections_initialized = True
+
+    # Запускаем инициализацию (в фоне)
+    if not st.session_state.mcp_connections_initialized:
+        try:
+            asyncio.run(init_mcp_connections())
+        except RuntimeError:
+            # Если event loop уже запущен (например в Streamlit)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(init_mcp_connections())
+
+    # Отображаем текущие подключения
+    connections = st.session_state.mcp_manager.get_connections_info()
+
+    if connections:
+        for conn in connections:
+            col1, col2, col3 = st.columns([2, 1, 1])
+            with col1:
+                st.markdown(f"**{conn['name']}**")
+                st.caption(f"{conn['tools_count']} tools | {conn['type']}")
+            with col2:
+                if conn['status'] == "connected":
+                    st.success("✅")
+                else:
+                    st.warning("⚪")
+            with col3:
+                if st.button("Disconnect", key=f"disconnect_{conn['id']}"):
+                    try:
+                        asyncio.run(st.session_state.mcp_manager.disconnect(conn['id']))
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(st.session_state.mcp_manager.disconnect(conn['id']))
+                    st.rerun()
+    else:
+        st.info("No MCP connections. Local server will auto-connect.")
+
+    # Кнопка ручного подключения
+    with st.expander("➕ Add MCP Server", expanded=False):
+        server_type = st.selectbox("Server Type", ["Local (stdio)", "Remote (HTTP) - coming soon"])
+        
+        if server_type == "Local (stdio)":
+            server_path = st.text_input("Script Path", value="mcp_integration/servers/echo_server.py")
+            server_name = st.text_input("Display Name", value="Custom Server")
+            
+            if st.button("Connect"):
+                async def connect():
+                    await st.session_state.mcp_manager.connect_local(
+                        server_id="custom_" + str(hash(server_path)),
+                        script_path=server_path,
+                        name=server_name
+                    )
+                try:
+                    asyncio.run(connect())
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(connect())
+                st.rerun()
+
+    # Показываем активные инструменты
+    all_tools = st.session_state.mcp_manager.get_all_tools()
+    if all_tools:
+        with st.expander("🔧 Active Tools", expanded=False):
+            for tool in all_tools[:10]:
+                st.caption(f"• {tool['server_name']} :: {tool['tool_name']}")
+            if len(all_tools) > 10:
+                st.caption(f"... and {len(all_tools) - 10} more")
+                
     # ===== КРАТКОСРОЧНАЯ ПАМЯТЬ =====
     with st.expander("📝 Short-Term Memory", expanded=True):
         assistant = st.session_state.assistant
