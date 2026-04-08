@@ -19,7 +19,7 @@ class MCPClient:
         
         try:
             server_params = StdioServerParameters(
-                command="python",
+                command="python3",
                 args=[server_script_path],
                 env=None
             )

@@ -57,8 +57,8 @@ class CodeAssistant:
         )
         
         # Модели
-        self.main_model = "openrouter/free" # stepfun/step-3.5-flash:free
-        self.summarizer_model = "openrosuter/free" #nvidia/nemotron-3-nano-30b-a3b:free arcee-ai/trinity-large-preview:free
+        self.main_model = "anthropic/claude-opus-4.6"
+        self.summarizer_model = "openrouter/free"
         
         # Инициализация памяти
         self.short_term = ShortTermMemory(
@@ -225,143 +225,105 @@ class CodeAssistant:
                 }
             }
         ]
-        
+
+       # Загружаем MCP инструменты
+        self.mcp_client = None
+        self._load_mcp_tools()
+
         print(f"✅ Agent initialized: session={self.session_id}, profile={self.profile_manager.get_active_profile()}")
 
-
-    
-    def _summarize_messages(self, messages: List) -> str:
-        """Суммаризирует старые сообщения для краткосрочной памяти"""
-        conversation = "\n".join([f"{m.role}: {m.content}" for m in messages])
+    def _load_mcp_tools(self):
+        """Загружает MCP инструменты в список tools для OpenAI"""
+        import asyncio
+        import traceback
         
-        prompt = f"""Суммаризируй следующий диалог кратко, но информативно (3-5 предложений). 
-Сохрани: основную тему, ключевые вопросы, важные решения пользователя.
-
-Диалог:
-{conversation}
-
-Суммаризация:"""
+        print("🔍 DEBUG: Starting _load_mcp_tools")
+        
+        # Путь к MCP серверу
+        server_path = "mcp_integration/servers/yandex_maps_server.py"
+        
+        print(f"🔍 DEBUG: Checking server path: {server_path}")
+        print(f"🔍 DEBUG: Path exists: {os.path.exists(server_path)}")
+        
+        if not os.path.exists(server_path):
+            print(f"⚠️ MCP сервер не найден: {server_path}")
+            return
         
         try:
-            response = self.client.chat.completions.create(
-                model=self.summarizer_model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=2000,
-            )
-            return response.choices[0].message.content
+            from mcp_integration.client import MCPClient
+            
+            async def connect():
+                print("🔍 DEBUG: Creating MCP client...")
+                client = MCPClient()
+                print("🔍 DEBUG: Connecting to server...")
+                success = await client.connect(server_path, "Yandex Maps")
+                print(f"🔍 DEBUG: Connection success: {success}")
+                if success:
+                    print(f"🔍 DEBUG: Tools received: {list(client.tools.keys())}")
+                return client, success
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            client, success = loop.run_until_complete(connect())
+            loop.close()
+            
+            if success:
+                self.mcp_client = client
+                tool_count = 0
+                for tool_name, tool_info in client.tools.items():
+                    openai_tool = {
+                        "type": "function",
+                        "function": {
+                            "name": f"mcp_{tool_name}",
+                            "description": tool_info.get("description", ""),
+                            "parameters": tool_info.get("input_schema", {
+                                "type": "object",
+                                "properties": {},
+                                "required": []
+                            })
+                        }
+                    }
+                    self.tools.append(openai_tool)
+                    tool_count += 1
+                    print(f"🔍 DEBUG: Added tool: mcp_{tool_name}")
+                print(f"✅ Загружено MCP инструментов: {tool_count} - {list(client.tools.keys())}")
+            else:
+                print("🔍 DEBUG: Connection failed - server not responding")
         except Exception as e:
-            print(f"⚠️ Summarization failed: {e}")
-            return f"[Previous conversation: {len(messages)} messages]"
-    
-    def _recall_relevant_memories(self, user_input: str) -> List[MemoryEntry]:
-        """Восстанавливает релевантные записи из долговременной памяти"""
+            print(f"⚠️ Ошибка загрузки MCP: {e}")
+            traceback.print_exc()
+
+    def _call_mcp_tool_sync(self, tool_name: str, args: dict) -> str:
+        """Синхронная обёртка для вызова MCP инструмента"""
+        import asyncio
+        import traceback
+        
+        print(f"🔍 DEBUG MCP: Calling tool '{tool_name}' with args: {args}")
+        print(f"🔍 DEBUG MCP: mcp_client exists: {hasattr(self, 'mcp_client') and self.mcp_client is not None}")
+        
+        if not hasattr(self, 'mcp_client') or self.mcp_client is None:
+            print("🔍 DEBUG MCP: Client not available")
+            return "MCP клиент не подключён"
+        
+        async def _call():
+            print(f"🔍 DEBUG MCP: Inside async _call, invoking {tool_name}")
+            result = await self.mcp_client.call_tool(tool_name, args)
+            print(f"🔍 DEBUG MCP: Raw result type: {type(result)}, length: {len(str(result)) if result else 0}")
+            return result
+        
         try:
-            return self.long_term.recall(user_input, limit=3)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(_call())
+            loop.close()
+            print(f"🔍 DEBUG MCP: Result preview: {str(result)[:200] if result else 'empty'}")
+            return str(result)[:500] if result else "Инструмент вернул пустой результат"
         except Exception as e:
-            print(f"⚠️ Memory recall failed: {e}")
-            return []
-    
-    def _build_system_prompt(self, relevant_memories: List[MemoryEntry]) -> str:
-        """Собирает system prompt из профиля и других источников"""
-        
-        profile_content = self.profile_manager.get_profile_for_prompt()
-        long_term_context = self.long_term.format_for_prompt(relevant_memories)
-        working_context = self.working.to_system_text()
-        
-        # Упрощённая инструкция — без криков и противоречий
-        unified_rules = """
-    ## Task States & Transitions
+            print(f"🔍 DEBUG MCP: Error: {e}")
+            traceback.print_exc()
+            return f"Ошибка MCP: {e}"
 
-    Есть обязательные четыре состояния любого диалога: PLANNING, EXECUTION, VALIDATION, DONE.
-    Задача начинается всегда со стадии PLANNING
-    **Когда переходим:**
-
-    | Current State | Trigger | Next State |
-    |---------------|---------|------------|
-    | PLANNING | Пользователь подтвердил план или выразил готовность приступать к реализации | EXECUTION |
-    | EXECUTION | Код написан, пользователь прямо или косвенно подтвердил выполнение | VALIDATION |
-    | EXECUTION | В ходе написания кода возникла необходимость уточнить архитектуру, спланировать дополниетльные модули | PLANNING |
-    | VALIDATION | Тест пройден или пользователь подтвердил выполнение | DONE |
-    | VALIDATION | Тест не пройден или пользователь попросил исправить | EXECUTION |
-    | DONE | Пользователь задал новый вопрос | PLANNING |
-
-    **CRITICAL RULES:**
-    1. Допустимые переходы (все остальные - запрещены? даже по просьбе пользователя):
-    PLANNING->EXECUTION
-    EXECUTION->VALIDATION
-    EXECUTION->PLANNING
-    VALIDATION->DONE
-    VALIDATION->EXECUTION
-    PLANNING->DONE
-
-    2. Всегда вызывай transition_state tool когда нужно поменять состояние
-    3. Запрещены пустые ответы пользователю, всегда возвращай хотя бы короткий ответ, описывающий текущую стадию задачи
-    4. Запрещено завершать задачу, пока она не прошла все четыре стадии разработки.
-    5. Даже если пользователь говорит, что задача выполнена, ты обязан просто перейти к следующему шагу по цепочке состояний, а не завршать задачу. Задача может завершится, только пойдя все 4 этапа
-    6. Всегда начинай диалог с плана реализации.
-    ## Tool Usage Rules (CRITICAL)
-
-    **IMPORTANT: How to use tools**
-    - Tools are called using the system's tool calling mechanism, NOT as text in your response
-    - NEVER write tool calls as plain text like: update_working_memory(...) or
-      "I'll call update_working_memory(...)". This is a critical error.
-    - When you need to use a tool, the system will provide a tool_call block. Just use it naturally.
-    - The system automatically detects when you want to use a tool based on your intent.
-    - DO NOT mention tool names in your response text. Use them silently via the tool calling mechanism.
-
-    
-    **Available Tools:**
-    - transition_state(target_state, reason) - Change task state
-    - update_current_step(current_step, next_step) - Update progress
-    - update_working_memory(goal, files, blockers) - Update task context
-    - save_to_long_term_memory(content, entry_type, importance, tags) - Save important info
-    - add_task(name, status) - Add subtask
-    - update_task_status(name, status) - Update subtask
-    - add_blocker(blocker) - Report blocker
-    - resolve_blocker(blocker) - Resolve blocker
-    - set_expected_from_user(expected) - Tell user what you expect
-    """
-        
-        return f"""{profile_content}
-
-    {long_term_context if long_term_context else ""}
-
-    {working_context}
-
-    {unified_rules}
-    """
-
-    
-    def _build_user_prompt(self, user_input: str) -> str:
-        """Собирает user prompt с краткосрочной памятью"""
-        short_context = self.short_term.get_context()
-        
-        if short_context:
-            return f"""{short_context}
-
-## Current User Input
-
-{user_input}"""
-        else:
-            return user_input
-
-    def switch_profile(self, profile_id: str) -> bool:
-        """Переключает профиль пользователя"""
-        success = self.profile_manager.set_active_profile(profile_id)
-        if success:
-            print(f"🔄 Switched to profile: {profile_id}")
-        return success
-    
-    def list_profiles(self) -> List[Dict]:
-        """Возвращает список доступных профилей"""
-        return self.profile_manager.list_profiles()
-    
-    def get_current_profile_id(self) -> str:
-        """Возвращает ID текущего профиля"""
-        return self.profile_manager.get_active_profile()
-    
-    def _execute_tool_calls(self, tool_calls: List) -> str:
+    async def _execute_tool_calls(self, tool_calls: List) -> str:
         """Выполняет вызовы инструментов и возвращает результат"""
         results = []
         
@@ -369,8 +331,10 @@ class CodeAssistant:
             name = tool_call.function.name
             args = json.loads(tool_call.function.arguments)
             
+            print(f"🔍 DEBUG: Processing tool call: {name}")
+            print(f"🔍 DEBUG: Args: {args}")
+            
             if name == "update_working_memory":
-                # Теперь метод update есть в WorkingMemory
                 changed = self.working.update(**args)
                 results.append(f"Working memory updated: {', '.join(changed)}")
             
@@ -413,6 +377,242 @@ class CodeAssistant:
             elif name == "set_expected_from_user":
                 self.working.set_expected_from_user(args["expected"])
                 results.append(f"Expected from user: {args['expected']}")
+            
+            elif name.startswith("mcp_"):
+                tool_name = name[4:]
+                print(f"🔍 DEBUG: MCP tool detected: {tool_name}")
+                result = self._call_mcp_tool_sync(tool_name, args)
+                print(f"🔍 DEBUG: MCP result preview: {result[:100] if result else 'empty'}")
+                results.append(f"MCP {tool_name}: {result}")
+            
+            else:
+                print(f"🔍 DEBUG: Unknown tool: {name}")
+                results.append(f"Unknown tool: {name}")
+        
+        return "\n".join(results) if results else "No tools executed"
+            
+    def _summarize_messages(self, messages: List) -> str:
+        """Суммаризирует старые сообщения для краткосрочной памяти"""
+        conversation = "\n".join([f"{m.role}: {m.content}" for m in messages])
+        
+        prompt = f"""Суммаризируй следующий диалог кратко, но информативно (3-5 предложений). 
+Сохрани: основную тему, ключевые вопросы, важные решения пользователя.
+
+Диалог:
+{conversation}
+
+Суммаризация:"""
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.summarizer_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=2000,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"⚠️ Summarization failed: {e}")
+            return f"[Previous conversation: {len(messages)} messages]"
+        
+    def _load_mcp_tools(self):
+        """Загружает MCP инструменты в список tools для OpenAI"""
+        import asyncio
+        
+        # Путь к MCP серверу
+        server_path = "mcp_integration/servers/yandex_maps_server.py"
+        
+        if not os.path.exists(server_path):
+            print(f"⚠️ MCP сервер не найден: {server_path}")
+            return
+        
+        try:
+            # Создаём клиент и подключаемся
+            from mcp_integration.client import MCPClient
+            
+            async def connect():
+                client = MCPClient()
+                success = await client.connect(server_path, "Yandex Maps")
+                return client, success
+            
+            # Запускаем асинхронно
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            client, success = loop.run_until_complete(connect())
+            loop.close()
+            
+            if success:
+                self.mcp_client = client
+                # Добавляем инструменты в tools
+                for tool_name, tool_info in client.tools.items():
+                    openai_tool = {
+                        "type": "function",
+                        "function": {
+                            "name": f"mcp_{tool_name}",
+                            "description": tool_info.get("description", ""),
+                            "parameters": tool_info.get("input_schema", {
+                                "type": "object",
+                                "properties": {},
+                                "required": []
+                            })
+                        }
+                    }
+                    self.tools.append(openai_tool)
+                print(f"✅ Загружено MCP инструментов: {list(client.tools.keys())}")
+        except Exception as e:
+            print(f"⚠️ Ошибка загрузки MCP: {e}")
+    def _recall_relevant_memories(self, user_input: str) -> List[MemoryEntry]:
+        """Восстанавливает релевантные записи из долговременной памяти"""
+        try:
+            return self.long_term.recall(user_input, limit=3)
+        except Exception as e:
+            print(f"⚠️ Memory recall failed: {e}")
+            return []
+    
+    def _build_system_prompt(self, relevant_memories: List[MemoryEntry]) -> str:
+        """Собирает system prompt из профиля и других источников"""
+        
+        profile_content = self.profile_manager.get_profile_for_prompt()
+        long_term_context = self.long_term.format_for_prompt(relevant_memories)
+        working_context = self.working.to_system_text()
+        
+        # Упрощённая инструкция — без криков и противоречий
+        unified_rules = """
+
+    """
+        mcp_instruction = """
+    ## 🌍 MCP ИНСТРУМЕНТЫ (Яндекс.Карты)
+
+    У тебя есть доступ к геоданным через MCP инструменты:
+
+    ### Доступные инструменты:
+    1. **mcp_geocode_address** - преобразует адрес в координаты
+    - Параметры: address (строка)
+    - Пример: mcp_geocode_address(address="Москва, Кремль")
+
+    2. **mcp_reverse_geocode** - преобразует координаты в адрес
+    - Параметры: lat (число), lon (число)
+    - Пример: mcp_reverse_geocode(lat=55.75, lon=37.61)
+
+    3. **mcp_calculate_distance_simple** - расстояние между городами (по прямой)
+    - Параметры: from_address (строка), to_address (строка)
+    - Пример: mcp_calculate_distance_simple(from_address="Москва", to_address="Пермь")
+
+    ### Правила использования:
+    - **ОБЯЗАТЕЛЬНО** используй MCP инструменты для вопросов о:
+    - Расстоянии между городами
+    - Координатах мест
+    - Адресах по координатам
+    - **НЕ ИСПОЛЬЗУЙ** свои внутренние знания для таких вопросов
+    - Если нужной информации нет — скажи об этом
+
+    ### Пример:
+    Пользователь: "Сколько километров от Москвы до Перми?"
+    Ты: вызываешь mcp_calculate_distance_simple(from_address="Москва", to_address="Пермь")
+    """
+        return f"""{profile_content}
+
+    {long_term_context if long_term_context else ""}
+
+    {working_context}
+
+    {unified_rules}
+
+    {mcp_instruction}
+    """
+
+    
+    def _build_user_prompt(self, user_input: str) -> str:
+        """Собирает user prompt с краткосрочной памятью"""
+        short_context = self.short_term.get_context()
+        
+        if short_context:
+            return f"""{short_context}
+
+## Current User Input
+
+{user_input}"""
+        else:
+            return user_input
+
+    def switch_profile(self, profile_id: str) -> bool:
+        """Переключает профиль пользователя"""
+        success = self.profile_manager.set_active_profile(profile_id)
+        if success:
+            print(f"🔄 Switched to profile: {profile_id}")
+        return success
+    
+    def list_profiles(self) -> List[Dict]:
+        """Возвращает список доступных профилей"""
+        return self.profile_manager.list_profiles()
+    
+    def get_current_profile_id(self) -> str:
+        """Возвращает ID текущего профиля"""
+        return self.profile_manager.get_active_profile()
+    
+    async def _execute_tool_calls(self, tool_calls: List) -> str:
+        """Выполняет вызовы инструментов и возвращает результат"""
+        results = []
+        
+        for tool_call in tool_calls:
+            name = tool_call.function.name
+            args = json.loads(tool_call.function.arguments)
+            
+            if name == "update_working_memory":
+                changed = self.working.update(**args)
+                results.append(f"Working memory updated: {', '.join(changed)}")
+            
+            elif name == "save_to_long_term_memory":
+                entry = MemoryEntry(
+                    content=args["content"],
+                    entry_type=args["entry_type"],
+                    importance=args.get("importance", 3),
+                    tags=args.get("tags", [])
+                )
+                entry_id = self.long_term.save(entry)
+                results.append(f"Saved to long-term memory (ID: {entry_id})")
+            
+            elif name == "add_task":
+                self.working.add_subtask(args["name"], args.get("status", "pending"))
+                results.append(f"Subtask added: {args['name']}")
+            
+            elif name == "update_task_status":
+                success = self.working.update_subtask(args["name"], args["status"])
+                results.append(f"Subtask {args['name']} → {args['status']}: {'done' if success else 'not found'}")
+            
+            elif name == "add_blocker":
+                self.working.add_blocker(args["blocker"])
+                results.append(f"Blocker added: {args['blocker']}")
+            
+            elif name == "resolve_blocker":
+                success = self.working.resolve_blocker(args["blocker"])
+                results.append(f"Blocker {args['blocker']}: {'resolved' if success else 'not found'}")
+            
+            elif name == "transition_state":
+                success = self.working.transition_state(args["target_state"], args.get("reason", ""))
+                results.append(f"State transition: {success}")
+                if success:
+                    results.append(f"Now in state: {self.working.task.state.value}")
+            
+            elif name == "update_current_step":
+                self.working.task.update_progress(args["current_step"], args.get("next_step", ""))
+                results.append(f"Current step updated: {args['current_step']}")
+            
+            elif name == "set_expected_from_user":
+                self.working.set_expected_from_user(args["expected"])
+                results.append(f"Expected from user: {args['expected']}")
+            
+            elif name.startswith("mcp_"):
+                # MCP инструмент
+                tool_name = name[4:]  # убираем префикс "mcp_"
+                if hasattr(self, 'mcp_client') and self.mcp_client:
+                    try:
+                        result = await self.mcp_client.call_tool(tool_name, args)
+                        results.append(f"MCP {tool_name}: {str(result)[:200]}")
+                    except Exception as e:
+                        results.append(f"Ошибка MCP: {e}")
+                else:
+                    results.append("MCP клиент не подключён")
         
         return "\n".join(results) if results else "No tools executed"
 
@@ -534,7 +734,9 @@ class CodeAssistant:
                 # 7. Обрабатываем tool calls
                 if assistant_message.tool_calls:
                     self.short_term.add("assistant", json.dumps([tc.function.name for tc in assistant_message.tool_calls]))
-                    tool_results = self._execute_tool_calls(assistant_message.tool_calls)
+                    
+                    import asyncio
+                    tool_results = asyncio.run(self._execute_tool_calls(assistant_message.tool_calls))
                     
                     messages.append(assistant_message)
                     messages.append({
@@ -546,13 +748,11 @@ class CodeAssistant:
                     final_response = self.client.chat.completions.create(
                         model=self.main_model,
                         messages=messages,
-                        tools=self.tools,
-                        tool_choice="auto",
                         temperature=0.7,
                     )
                     answer = final_response.choices[0].message.content
                 else:
-                    answer = assistant_message.content
+                    answer = assistant_message.content  # <-- ЭТА СТРОКА БЫЛА ПРОПУЩЕНА!
                 
                 # Очищаем ответ от возможного синтаксиса вызова инструментов
                 answer = self._sanitize_response(answer)
