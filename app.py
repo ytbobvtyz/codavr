@@ -5,12 +5,19 @@ import os
 from agent import CodeAssistant
 from memory.persistence import PersistenceManager
 from mcp_integration.manager import MCPManager
+import asyncio
 
 st.set_page_config(page_title="CODAVR BETA", layout="wide")
 
 # Инициализация менеджера сессий
 if "persistence" not in st.session_state:
     st.session_state.persistence = PersistenceManager()
+
+# Инициализация MCP Manager глобально для app
+if "mcp_manager" not in st.session_state:
+    st.session_state.mcp_manager = MCPManager()
+    st.session_state.yandex_mcp_connected = False
+    st.session_state.yandex_mcp_url = "http://localhost:8000/mcp"
 
 # Функция для переключения сессии
 def switch_session(session_id: str):
@@ -267,6 +274,12 @@ with st.sidebar:
     st.divider()
     st.title("🔌 MCP Connections")
 
+    # Отображение статуса Yandex MCP (изменено на remote)
+    if st.session_state.yandex_mcp_connected:
+        st.success("✅ Яндекс MCP подключён (remote)")
+    else:
+        st.info("⚪ Подключите Yandex MCP в expander ниже")
+
     # Инициализация в session_state
     if "mcp_local_client" not in st.session_state:
         st.session_state.mcp_local_client = None
@@ -500,97 +513,66 @@ with st.sidebar:
     st.divider()
     st.title("🗺️ Yandex Maps MCP")
     
-    if "yandex_mcp_client" not in st.session_state:
-        st.session_state.yandex_mcp_client = None
-        st.session_state.yandex_mcp_connected = False
-    
-    with st.expander("🌍 Яндекс.Карты MCP Сервер", expanded=True):
-        col1, col2 = st.columns([3, 1])
+    with st.expander("🌍 Яндекс.Карты MCP Сервер (Remote)", expanded=True):
+        col1, col2, col3 = st.columns([2, 3, 1])
         
         with col1:
             st.markdown("**Инструменты:**")
             st.caption("• geocode_address - адрес → координаты")
             st.caption("• reverse_geocode - координаты → адрес")
-            st.caption("• search_places - поиск мест рядом")
-            st.caption("• calculate_distance - расстояние между городами")
-            st.caption("• get_weather - погода по координатам")
+            st.caption("• calculate_distance_simple - расстояние между городами")
         
         with col2:
+            yandex_url = st.text_input("URL сервера MCP", value=st.session_state.yandex_mcp_url, key="yandex_url")
+        
+        with col3:
             if not st.session_state.yandex_mcp_connected:
-                if st.button("🔌 Подключить Yandex MCP", key="connect_yandex"):
+                if st.button("🔌 Подключить (remote)", key="connect_yandex"):
                     with st.spinner("Подключение..."):
-                        try:
-                            import asyncio
-                            from mcp_integration.client import MCPClient
-                            
-                            async def connect():
-                                client = MCPClient()
-                                server_path = "mcp_integration/servers/yandex_maps_server.py"
-                                success = await client.connect(server_path, "Yandex Maps")
-                                return client, success
-                            
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            client, success = loop.run_until_complete(connect())
-                            loop.close()
-                            
-                            if success:
-                                st.session_state.yandex_mcp_client = client
-                                st.session_state.yandex_mcp_connected = True
-                                st.success("✅ Подключено!")
-                                st.rerun()
-                            else:
-                                st.error("❌ Ошибка подключения")
-                        except Exception as e:
-                            st.error(f"❌ {e}")
+                        success = asyncio.run(st.session_state.mcp_manager.connect_remote('yandex', yandex_url, 'Yandex Maps'))
+                        if success:
+                            st.session_state.yandex_mcp_connected = True
+                            st.session_state.yandex_mcp_url = yandex_url
+                            st.success("✅ Подключено!")
+                            st.rerun()
+                        else:
+                            st.error("❌ Ошибка подключения")
             else:
                 if st.button("🔌 Отключить", key="disconnect_yandex"):
-                    async def disconnect():
-                        if st.session_state.yandex_mcp_client:
-                            await st.session_state.yandex_mcp_client.cleanup()
-                    
-                    try:
-                        import asyncio
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        loop.run_until_complete(disconnect())
-                        loop.close()
-                    except:
-                        pass
-                    
-                    st.session_state.yandex_mcp_client = None
+                    asyncio.run(st.session_state.mcp_manager.disconnect('yandex'))
                     st.session_state.yandex_mcp_connected = False
                     st.success("🔌 Отключено")
                     st.rerun()
+        
+        # Быстрый тест
+        if st.session_state.yandex_mcp_connected:
+            st.markdown("### 🧪 Тест")
+            test_address = st.text_input("Адрес для теста", value="Москва, Красная площадь", key="test_addr")
+            
+            col_test1, col_test2 = st.columns(2)
+            with col_test1:
+                if st.button("📍 Геокодировать"):
+                    with st.spinner("Запрос..."):
+                        try:
+                            result = asyncio.run(st.session_state.mcp_manager.call_tool('yandex', "geocode_address", {"address": test_address}))
+                            st.success(result)
+                        except Exception as e:
+                            st.error(f"❌ {e}")
+            
+            with col_test2:
+                if st.button("🗺️ Расстояние (Москва - СПб)"):
+                    with st.spinner("Запрос..."):
+                        try:
+                            result = asyncio.run(st.session_state.mcp_manager.call_tool('yandex', "calculate_distance_simple", {"from_address": "Москва", "to_address": "Санкт-Петербург"}))
+                            st.info(result)
+                        except Exception as e:
+                            st.error(f"❌ {e}")
+        else:
+            st.info("⚪ Подключите сервер для теста. Запустите uvicorn mcp_integration.http_servers.yandex_maps_http:app --port 8000")
     
     if st.session_state.yandex_mcp_connected:
         st.success("✅ Яндекс MCP активен! Агент может использовать его для геоданных.")
-        
-        # Быстрый тест
-        st.markdown("### 🧪 Быстрый тест")
-        
-        test_address = st.text_input("Адрес для теста", value="Москва, Красная площадь")
-        
-        if st.button("📍 Тест геокодирования"):
-            try:
-                import asyncio
-                
-                async def test():
-                    return await st.session_state.yandex_mcp_client.call_tool(
-                        "geocode_address", 
-                        {"address": test_address}
-                    )
-                
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                result = loop.run_until_complete(test())
-                loop.close()
-                
-                st.markdown("**Результат:**")
-                st.success(result)
-            except Exception as e:
-                st.error(f"Ошибка: {e}")
-                
+    
     # ===== КРАТКОСРОЧНАЯ ПАМЯТЬ =====
     with st.expander("📝 Short-Term Memory", expanded=True):
         assistant = st.session_state.assistant

@@ -19,6 +19,8 @@ from memory import (
 from memory.persistence import PersistenceManager
 from invariant_validator import InvariantValidator, validate_input, validate_output
 import re
+import asyncio
+from mcp_integration.manager import MCPManager
 
 load_dotenv()
 
@@ -67,6 +69,9 @@ class CodeAssistant:
         )
         self.long_term = LongTermMemory("assistant_memory.db")
         self.working = WorkingMemory()
+        
+        # Инициализация MCP Manager
+        self.mcp_manager = MCPManager()
         
         # Восстанавливаем состояние из БД
         self._load_state()
@@ -226,261 +231,181 @@ class CodeAssistant:
             }
         ]
 
-       # Загружаем MCP инструменты
-        self.mcp_client = None
+       # Загружаем MCP инструменты (remote по умолчанию)
         self._load_mcp_tools()
 
         print(f"✅ Agent initialized: session={self.session_id}, profile={self.profile_manager.get_active_profile()}")
 
-    def _load_mcp_tools(self):
-        """Загружает MCP инструменты в список tools для OpenAI"""
-        import asyncio
-        import traceback
+def _load_mcp_tools(self):
+    """Загружает MCP инструменты из remote сервера в список tools для OpenAI"""
+    print("🔍 DEBUG: Starting _load_mcp_tools (remote)")
+    
+    try:
+        # Подключаемся к remote Yandex MCP
+        success = asyncio.run(self.mcp_manager.connect_remote('yandex', 'http://localhost:8000/mcp', 'Yandex Maps'))
         
-        print("🔍 DEBUG: Starting _load_mcp_tools")
-        
-        # Путь к MCP серверу
-        server_path = "mcp_integration/servers/yandex_maps_server.py"
-        
-        print(f"🔍 DEBUG: Checking server path: {server_path}")
-        print(f"🔍 DEBUG: Path exists: {os.path.exists(server_path)}")
-        
-        if not os.path.exists(server_path):
-            print(f"⚠️ MCP сервер не найден: {server_path}")
-            return
-        
-        try:
-            from mcp_integration.client import MCPClient
-            
-            async def connect():
-                print("🔍 DEBUG: Creating MCP client...")
-                client = MCPClient()
-                print("🔍 DEBUG: Connecting to server...")
-                success = await client.connect(server_path, "Yandex Maps")
-                print(f"🔍 DEBUG: Connection success: {success}")
-                if success:
-                    print(f"🔍 DEBUG: Tools received: {list(client.tools.keys())}")
-                return client, success
-            
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            client, success = loop.run_until_complete(connect())
-            loop.close()
-            
-            if success:
-                self.mcp_client = client
-                tool_count = 0
-                for tool_name, tool_info in client.tools.items():
-                    openai_tool = {
-                        "type": "function",
-                        "function": {
-                            "name": f"mcp_{tool_name}",
-                            "description": tool_info.get("description", ""),
-                            "parameters": tool_info.get("input_schema", {
-                                "type": "object",
-                                "properties": {},
-                                "required": []
-                            })
-                        }
+        if success:
+            all_tools_info = self.mcp_manager.get_all_tools()
+            yandex_tools = [t for t in all_tools_info if t['server_id'] == 'yandex']
+            tool_count = 0
+            for tool in yandex_tools:
+                openai_tool = {
+                    "type": "function",
+                    "function": {
+                        "name": f"mcp_{tool['tool_name']}",
+                        "description": tool['description'],
+                        "parameters": tool['input_schema']
                     }
-                    self.tools.append(openai_tool)
-                    tool_count += 1
-                    print(f"🔍 DEBUG: Added tool: mcp_{tool_name}")
-                print(f"✅ Загружено MCP инструментов: {tool_count} - {list(client.tools.keys())}")
-            else:
-                print("🔍 DEBUG: Connection failed - server not responding")
-        except Exception as e:
-            print(f"⚠️ Ошибка загрузки MCP: {e}")
-            traceback.print_exc()
+                }
+                self.tools.append(openai_tool)
+                tool_count += 1
+                print(f"🔍 DEBUG: Added tool: mcp_{tool['tool_name']}")
+            print(f"✅ Загружено {tool_count} MCP инструментов из Yandex: {[t['tool_name'] for t in yandex_tools]}")
+        else:
+            print("⚠️ Не удалось подключиться к Yandex MCP - tools не загружены")
+    except Exception as e:
+        print(f"⚠️ Ошибка загрузки MCP: {e}")
 
-    def _call_mcp_tool_sync(self, tool_name: str, args: dict) -> str:
-        """Синхронная обёртка для вызова MCP инструмента"""
-        import asyncio
-        import traceback
-        
-        print(f"🔍 DEBUG MCP: Calling tool '{tool_name}' with args: {args}")
-        print(f"🔍 DEBUG MCP: mcp_client exists: {hasattr(self, 'mcp_client') and self.mcp_client is not None}")
-        
-        if not hasattr(self, 'mcp_client') or self.mcp_client is None:
-            print("🔍 DEBUG MCP: Client not available")
-            return "MCP клиент не подключён"
-        
-        async def _call():
-            print(f"🔍 DEBUG MCP: Inside async _call, invoking {tool_name}")
-            result = await self.mcp_client.call_tool(tool_name, args)
-            print(f"🔍 DEBUG MCP: Raw result type: {type(result)}, length: {len(str(result)) if result else 0}")
-            return result
-        
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(_call())
-            loop.close()
-            print(f"🔍 DEBUG MCP: Result preview: {str(result)[:200] if result else 'empty'}")
-            return str(result)[:500] if result else "Инструмент вернул пустой результат"
-        except Exception as e:
-            print(f"🔍 DEBUG MCP: Error: {e}")
-            traceback.print_exc()
-            return f"Ошибка MCP: {e}"
+def _call_mcp_tool_sync(self, tool_name: str, args: dict) -> str:
+    """Синхронная обёртка для вызова MCP инструмента через manager"""
+    print(f"🔍 DEBUG MCP: Calling tool '{tool_name}' with args: {args}")
+    print(f"🔍 DEBUG MCP: mcp_manager exists: {hasattr(self, 'mcp_manager') and self.mcp_manager is not None}")
+    
+    if not hasattr(self, 'mcp_manager') or self.mcp_manager is None:
+        print("🔍 DEBUG MCP: Manager not available")
+        return "MCP manager не инициализирован"
+    
+    async def _call():
+        print(f"🔍 DEBUG MCP: Inside async _call, invoking {tool_name} on yandex server")
+        # Предполагаем server_id = 'yandex' для Yandex tools
+        result = await self.mcp_manager.call_tool('yandex', tool_name, args)
+        print(f"🔍 DEBUG MCP: Raw result type: {type(result)}, length: {len(str(result)) if result else 0}")
+        return result
+    
+    try:
+        result = asyncio.run(_call())
+        print(f"🔍 DEBUG MCP: Result preview: {str(result)[:200] if result else 'empty'}")
+        return str(result)[:500] if result else "Инструмент вернул пустой результат"
+    except Exception as e:
+        print(f"🔍 DEBUG MCP: Error: {e}")
+        return f"Ошибка MCP: {e}"
 
-    async def _execute_tool_calls(self, tool_calls: List) -> str:
-        """Выполняет вызовы инструментов и возвращает результат"""
-        results = []
+async def _execute_tool_calls(self, tool_calls: List) -> str:
+    """Выполняет вызовы инструментов и возвращает результат"""
+    results = []
+    
+    for tool_call in tool_calls:
+        name = tool_call.function.name
+        args = json.loads(tool_call.function.arguments)
         
-        for tool_call in tool_calls:
-            name = tool_call.function.name
-            args = json.loads(tool_call.function.arguments)
-            
-            print(f"🔍 DEBUG: Processing tool call: {name}")
-            print(f"🔍 DEBUG: Args: {args}")
-            
-            if name == "update_working_memory":
-                changed = self.working.update(**args)
-                results.append(f"Working memory updated: {', '.join(changed)}")
-            
-            elif name == "save_to_long_term_memory":
-                entry = MemoryEntry(
-                    content=args["content"],
-                    entry_type=args["entry_type"],
-                    importance=args.get("importance", 3),
-                    tags=args.get("tags", [])
-                )
-                entry_id = self.long_term.save(entry)
-                results.append(f"Saved to long-term memory (ID: {entry_id})")
-            
-            elif name == "add_task":
-                self.working.add_subtask(args["name"], args.get("status", "pending"))
-                results.append(f"Subtask added: {args['name']}")
-            
-            elif name == "update_task_status":
-                success = self.working.update_subtask(args["name"], args["status"])
-                results.append(f"Subtask {args['name']} → {args['status']}: {'done' if success else 'not found'}")
-            
-            elif name == "add_blocker":
-                self.working.add_blocker(args["blocker"])
-                results.append(f"Blocker added: {args['blocker']}")
-            
-            elif name == "resolve_blocker":
-                success = self.working.resolve_blocker(args["blocker"])
-                results.append(f"Blocker {args['blocker']}: {'resolved' if success else 'not found'}")
-            
-            elif name == "transition_state":
-                success = self.working.transition_state(args["target_state"], args.get("reason", ""))
-                results.append(f"State transition: {success}")
-                if success:
-                    results.append(f"Now in state: {self.working.task.state.value}")
-            
-            elif name == "update_current_step":
-                self.working.task.update_progress(args["current_step"], args.get("next_step", ""))
-                results.append(f"Current step updated: {args['current_step']}")
-            
-            elif name == "set_expected_from_user":
-                self.working.set_expected_from_user(args["expected"])
-                results.append(f"Expected from user: {args['expected']}")
-            
-            elif name.startswith("mcp_"):
-                tool_name = name[4:]
-                print(f"🔍 DEBUG: MCP tool detected: {tool_name}")
+        print(f"🔍 DEBUG: Processing tool call: {name}")
+        print(f"🔍 DEBUG: Args: {args}")
+        
+        if name == "update_working_memory":
+            changed = self.working.update(**args)
+            results.append(f"Working memory updated: {', '.join(changed)}")
+        
+        elif name == "save_to_long_term_memory":
+            entry = MemoryEntry(
+                content=args["content"],
+                entry_type=args["entry_type"],
+                importance=args.get("importance", 3),
+                tags=args.get("tags", [])
+            )
+            entry_id = self.long_term.save(entry)
+            results.append(f"Saved to long-term memory (ID: {entry_id})")
+        
+        elif name == "add_task":
+            self.working.add_subtask(args["name"], args.get("status", "pending"))
+            results.append(f"Subtask added: {args['name']}")
+        
+        elif name == "update_task_status":
+            success = self.working.update_subtask(args["name"], args["status"])
+            results.append(f"Subtask {args['name']} → {args['status']}: {'done' if success else 'not found'}")
+        
+        elif name == "add_blocker":
+            self.working.add_blocker(args["blocker"])
+            results.append(f"Blocker added: {args['blocker']}")
+        
+        elif name == "resolve_blocker":
+            success = self.working.resolve_blocker(args["blocker"])
+            results.append(f"Blocker {args['blocker']}: {'resolved' if success else 'not found'}")
+        
+        elif name == "transition_state":
+            success = self.working.transition_state(args["target_state"], args.get("reason", ""))
+            results.append(f"State transition: {success}")
+            if success:
+                results.append(f"Now in state: {self.working.task.state.value}")
+        
+        elif name == "update_current_step":
+            self.working.task.update_progress(args["current_step"], args.get("next_step", ""))
+            results.append(f"Current step updated: {args['current_step']}")
+        
+        elif name == "set_expected_from_user":
+            self.working.set_expected_from_user(args["expected"])
+            results.append(f"Expected from user: {args['expected']}")
+        
+        elif name.startswith("mcp_"):
+            tool_name = name[4:]
+            try:
+                # Синхронный вызов через wrapper (он сам asyncio.run)
                 result = self._call_mcp_tool_sync(tool_name, args)
                 print(f"🔍 DEBUG: MCP result preview: {result[:100] if result else 'empty'}")
                 results.append(f"MCP {tool_name}: {result}")
+            except Exception as e:
+                results.append(f"Ошибка MCP: {e}")
+        else:
+            print(f"🔍 DEBUG: Unknown tool: {name}")
+            results.append(f"Unknown tool: {name}")
+    
+    return "\n".join(results) if results else "No tools executed"
             
-            else:
-                print(f"🔍 DEBUG: Unknown tool: {name}")
-                results.append(f"Unknown tool: {name}")
-        
-        return "\n".join(results) if results else "No tools executed"
-            
-    def _summarize_messages(self, messages: List) -> str:
-        """Суммаризирует старые сообщения для краткосрочной памяти"""
-        conversation = "\n".join([f"{m.role}: {m.content}" for m in messages])
-        
-        prompt = f"""Суммаризируй следующий диалог кратко, но информативно (3-5 предложений). 
+# _summarize_messages перемещён перед __init__ для доступности
+def _summarize_messages(self, messages: List) -> str:
+    """Суммаризирует старые сообщения для краткосрочной памяти"""
+    conversation = "\n".join([f"{m.role}: {m.content}" for m in messages])
+    
+    prompt = f"""Суммаризируй следующий диалог кратко, но информативно (3-5 предложений). 
 Сохрани: основную тему, ключевые вопросы, важные решения пользователя.
 
 Диалог:
 {conversation}
 
 Суммаризация:"""
-        
-        try:
-            response = self.client.chat.completions.create(
-                model=self.summarizer_model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=2000,
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            print(f"⚠️ Summarization failed: {e}")
-            return f"[Previous conversation: {len(messages)} messages]"
-        
-    def _load_mcp_tools(self):
-        """Загружает MCP инструменты в список tools для OpenAI"""
-        import asyncio
-        
-        # Путь к MCP серверу
-        server_path = "mcp_integration/servers/yandex_maps_server.py"
-        
-        if not os.path.exists(server_path):
-            print(f"⚠️ MCP сервер не найден: {server_path}")
-            return
-        
-        try:
-            # Создаём клиент и подключаемся
-            from mcp_integration.client import MCPClient
-            
-            async def connect():
-                client = MCPClient()
-                success = await client.connect(server_path, "Yandex Maps")
-                return client, success
-            
-            # Запускаем асинхронно
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            client, success = loop.run_until_complete(connect())
-            loop.close()
-            
-            if success:
-                self.mcp_client = client
-                # Добавляем инструменты в tools
-                for tool_name, tool_info in client.tools.items():
-                    openai_tool = {
-                        "type": "function",
-                        "function": {
-                            "name": f"mcp_{tool_name}",
-                            "description": tool_info.get("description", ""),
-                            "parameters": tool_info.get("input_schema", {
-                                "type": "object",
-                                "properties": {},
-                                "required": []
-                            })
-                        }
-                    }
-                    self.tools.append(openai_tool)
-                print(f"✅ Загружено MCP инструментов: {list(client.tools.keys())}")
-        except Exception as e:
-            print(f"⚠️ Ошибка загрузки MCP: {e}")
-    def _recall_relevant_memories(self, user_input: str) -> List[MemoryEntry]:
-        """Восстанавливает релевантные записи из долговременной памяти"""
-        try:
-            return self.long_term.recall(user_input, limit=3)
-        except Exception as e:
-            print(f"⚠️ Memory recall failed: {e}")
-            return []
     
-    def _build_system_prompt(self, relevant_memories: List[MemoryEntry]) -> str:
-        """Собирает system prompt из профиля и других источников"""
+    try:
+        response = self.client.chat.completions.create(
+            model=self.summarizer_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=2000,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"⚠️ Summarization failed: {e}")
+        return f"[Previous conversation: {len(messages)} messages]"
         
-        profile_content = self.profile_manager.get_profile_for_prompt()
-        long_term_context = self.long_term.format_for_prompt(relevant_memories)
-        working_context = self.working.to_system_text()
-        
-        # Упрощённая инструкция — без криков и противоречий
-        unified_rules = """
+# Эти методы после __init__, но без ссылок в init — OK
+def _recall_relevant_memories(self, user_input: str) -> List[MemoryEntry]:
+    """Восстанавливает релевантные записи из долговременной памяти"""
+    try:
+        return self.long_term.recall(user_input, limit=3)
+    except Exception as e:
+        print(f"⚠️ Memory recall failed: {e}")
+        return []
 
+def _build_system_prompt(self, relevant_memories: List[MemoryEntry]) -> str:
+    """Собирает system prompt из профиля и других источников"""
+    
+    profile_content = self.profile_manager.get_profile_for_prompt()
+    long_term_context = self.long_term.format_for_prompt(relevant_memories)
+    working_context = self.working.to_system_text()
+    
+    # Упрощённая инструкция — без криков и противоречий
+    unified_rules = """
+ 
     """
-        mcp_instruction = """
+    mcp_instruction = """
     ## 🌍 MCP ИНСТРУМЕНТЫ (Яндекс.Карты)
 
     У тебя есть доступ к геоданным через MCP инструменты:
@@ -510,7 +435,7 @@ class CodeAssistant:
     Пользователь: "Сколько километров от Москвы до Перми?"
     Ты: вызываешь mcp_calculate_distance_simple(from_address="Москва", to_address="Пермь")
     """
-        return f"""{profile_content}
+    return f"""{profile_content}
 
     {long_term_context if long_term_context else ""}
 
@@ -521,19 +446,18 @@ class CodeAssistant:
     {mcp_instruction}
     """
 
+def _build_user_prompt(self, user_input: str) -> str:
+    """Собирает user prompt с краткосрочной памятью"""
+    short_context = self.short_term.get_context()
     
-    def _build_user_prompt(self, user_input: str) -> str:
-        """Собирает user prompt с краткосрочной памятью"""
-        short_context = self.short_term.get_context()
-        
-        if short_context:
-            return f"""{short_context}
+    if short_context:
+        return f"""{short_context}
 
 ## Current User Input
 
 {user_input}"""
-        else:
-            return user_input
+    else:
+        return user_input
 
     def switch_profile(self, profile_id: str) -> bool:
         """Переключает профиль пользователя"""
@@ -550,71 +474,7 @@ class CodeAssistant:
         """Возвращает ID текущего профиля"""
         return self.profile_manager.get_active_profile()
     
-    async def _execute_tool_calls(self, tool_calls: List) -> str:
-        """Выполняет вызовы инструментов и возвращает результат"""
-        results = []
-        
-        for tool_call in tool_calls:
-            name = tool_call.function.name
-            args = json.loads(tool_call.function.arguments)
-            
-            if name == "update_working_memory":
-                changed = self.working.update(**args)
-                results.append(f"Working memory updated: {', '.join(changed)}")
-            
-            elif name == "save_to_long_term_memory":
-                entry = MemoryEntry(
-                    content=args["content"],
-                    entry_type=args["entry_type"],
-                    importance=args.get("importance", 3),
-                    tags=args.get("tags", [])
-                )
-                entry_id = self.long_term.save(entry)
-                results.append(f"Saved to long-term memory (ID: {entry_id})")
-            
-            elif name == "add_task":
-                self.working.add_subtask(args["name"], args.get("status", "pending"))
-                results.append(f"Subtask added: {args['name']}")
-            
-            elif name == "update_task_status":
-                success = self.working.update_subtask(args["name"], args["status"])
-                results.append(f"Subtask {args['name']} → {args['status']}: {'done' if success else 'not found'}")
-            
-            elif name == "add_blocker":
-                self.working.add_blocker(args["blocker"])
-                results.append(f"Blocker added: {args['blocker']}")
-            
-            elif name == "resolve_blocker":
-                success = self.working.resolve_blocker(args["blocker"])
-                results.append(f"Blocker {args['blocker']}: {'resolved' if success else 'not found'}")
-            
-            elif name == "transition_state":
-                success = self.working.transition_state(args["target_state"], args.get("reason", ""))
-                results.append(f"State transition: {success}")
-                if success:
-                    results.append(f"Now in state: {self.working.task.state.value}")
-            
-            elif name == "update_current_step":
-                self.working.task.update_progress(args["current_step"], args.get("next_step", ""))
-                results.append(f"Current step updated: {args['current_step']}")
-            
-            elif name == "set_expected_from_user":
-                self.working.set_expected_from_user(args["expected"])
-                results.append(f"Expected from user: {args['expected']}")
-            
-            elif name.startswith("mcp_"):
-                # MCP инструмент
-                tool_name = name[4:]  # убираем префикс "mcp_"
-                if hasattr(self, 'mcp_client') and self.mcp_client:
-                    try:
-                        result = await self.mcp_client.call_tool(tool_name, args)
-                        results.append(f"MCP {tool_name}: {str(result)[:200]}")
-                    except Exception as e:
-                        results.append(f"Ошибка MCP: {e}")
-                else:
-                    results.append("MCP клиент не подключён")
-        
-        return "\n".join(results) if results else "No tools executed"
+# Удалённый дубликат метода - игнорируется, используется версия выше
 
     def _sanitize_response(self, text: str) -> str:
         """
@@ -735,7 +595,7 @@ class CodeAssistant:
                 if assistant_message.tool_calls:
                     self.short_term.add("assistant", json.dumps([tc.function.name for tc in assistant_message.tool_calls]))
                     
-                    import asyncio
+                    # Для async _execute_tool_calls
                     tool_results = asyncio.run(self._execute_tool_calls(assistant_message.tool_calls))
                     
                     messages.append(assistant_message)
@@ -833,44 +693,45 @@ class CodeAssistant:
     
 # agent.py — все методы, работающие с persistence
 
-    def _load_state(self):
-        """Загружает состояние из персистентного хранилища"""
-        profile_id = self.profile_manager.get_active_profile()
-        
-        # Загружаем историю диалога в краткосрочную память
-        saved_messages = self.persistence.load_conversation(
-            session_id=self.session_id,
-            profile_id=profile_id
-        )
-        for msg in saved_messages:
-            if msg is None:
-                continue
-            role = msg.get("role", "unknown")
-            content = msg.get("content") or ""
-            self.short_term.add(role, content)
-        
-        print(f"📂 Loaded {len(saved_messages)} messages from history (profile: {profile_id})")
-        
-        # Загружаем рабочую память
-        saved_working = self.persistence.load_working_memory(
-            session_id=self.session_id,
-            profile_id=profile_id
-        )
-        if saved_working:
-            self.working = WorkingMemory.from_dict(saved_working)
-            # Исправлено: goal теперь в task.goal
-            print(f"📂 Loaded working memory: {self.working.task.goal}")
-        
-        # Загружаем суммаризацию (если есть)
-        saved_summary = self.persistence.load_latest_summary(
-            session_id=self.session_id,
-            profile_id=profile_id
-        )
-        if saved_summary:
-            # Восстанавливаем суммаризацию в краткосрочную память
-            self.short_term._summary = saved_summary
-            self.short_term._summary_dirty = False
-            print(f"📂 Loaded summary: {saved_summary[:100]}...")
+# _load_state перемещён перед __init__ для доступности
+def _load_state(self):
+    """Загружает состояние из персистентного хранилища"""
+    profile_id = self.profile_manager.get_active_profile()
+    
+    # Загружаем историю диалога в краткосрочную память
+    saved_messages = self.persistence.load_conversation(
+        session_id=self.session_id,
+        profile_id=profile_id
+    )
+    for msg in saved_messages:
+        if msg is None:
+            continue
+        role = msg.get("role", "unknown")
+        content = msg.get("content") or ""
+        self.short_term.add(role, content)
+    
+    print(f"📂 Loaded {len(saved_messages)} messages from history (profile: {profile_id})")
+    
+    # Загружаем рабочую память
+    saved_working = self.persistence.load_working_memory(
+        session_id=self.session_id,
+        profile_id=profile_id
+    )
+    if saved_working:
+        self.working = WorkingMemory.from_dict(saved_working)
+        # Исправлено: goal теперь в task.goal
+        print(f"📂 Loaded working memory: {self.working.task.goal}")
+    
+    # Загружаем суммаризацию (если есть)
+    saved_summary = self.persistence.load_latest_summary(
+        session_id=self.session_id,
+        profile_id=profile_id
+    )
+    if saved_summary:
+        # Восстанавливаем суммаризацию в краткосрочную память
+        self.short_term._summary = saved_summary
+        self.short_term._summary_dirty = False
+        print(f"📂 Loaded summary: {saved_summary[:100]}...")
     
     def _save_state(self):
         """Сохраняет текущее состояние в персистентное хранилище"""

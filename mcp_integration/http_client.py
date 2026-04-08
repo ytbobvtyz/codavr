@@ -91,3 +91,48 @@ class RemoteMCPClient:
             lines.append(f"🔧 {name}")
             lines.append(f"   {info['description'][:100]}")
         return "\n".join(lines)
+
+    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+        """Вызывает инструмент на удалённом сервере через tools/call"""
+        if not self.connected:
+            raise RuntimeError("Клиент не подключён к серверу")
+        
+        if tool_name not in self.tools:
+            raise ValueError(f"Инструмент '{tool_name}' не найден")
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{self.server_url}/mcp",
+                    json={
+                        "jsonrpc": "2.0",
+                        "method": "tools/call",
+                        "params": {
+                            "name": tool_name,
+                            "arguments": arguments
+                        },
+                        "id": 3  # Или случайный id
+                    },
+                    headers={
+                        "Content-Type": "application/json",
+                        "mcp-session-id": self.session_id if self.session_id else ""
+                    }
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    if "result" in result and "content" in result["result"]:
+                        # MCP возвращает content как list, берём первый text
+                        content_list = result["result"]["content"]
+                        if content_list and isinstance(content_list[0], dict) and "text" in content_list[0]:
+                            return content_list[0]["text"]
+                        else:
+                            return str(result["result"].get("content", "Пустой результат"))
+                    else:
+                        raise ValueError(f"Неверный формат ответа: {result}")
+                else:
+                    raise Exception(f"Вызов инструмента неудачен: {response.status_code} - {response.text[:200]}")
+        
+        except Exception as e:
+            print(f"Ошибка вызова инструмента: {e}")
+            raise e
